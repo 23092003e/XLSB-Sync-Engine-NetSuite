@@ -21,9 +21,9 @@ COLUMN_MAPPING = {
 }
 
 DEFAULT_CONFIG = ProcessingConfig(
-    max_excel_instances=2,
-    timeout_seconds=300,
-    retry_attempts=2,
+    max_excel_instances=4,  # Increased for better parallelism
+    timeout_seconds=600,    # Increased timeout for large files
+    retry_attempts=1,       # Reduced retries to avoid excessive delays
     backup_enabled=True,
     column_mapping=COLUMN_MAPPING
 )

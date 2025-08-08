@@ -1,4 +1,0 @@
-pandas
-xlwings
-psutil
-pythoncom; sys_platform == 'win32'

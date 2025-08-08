@@ -1,5 +1,10 @@
 # scripts/process_entities.py
-import os, glob, time, argparse
+import sys
+import os
+# Add src directory to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+import glob, time, argparse
 from excel_processor.config import DEFAULT_CONFIG
 from excel_processor.batch import RobustBatchProcessor
 

@@ -7,6 +7,7 @@ from typing import List, Tuple, Optional, Dict
 from .models import ProcessingConfig, ProcessingResult
 from .com_management import COMManager, EnhancedExcelOptimizer
 from .subsidiary import SubsidiaryExtractor
+from .memory_optimizer import MemoryOptimizer
 
 class EnhancedExcelProcessor:
     def __init__(self, config: ProcessingConfig):
@@ -77,6 +78,9 @@ class EnhancedExcelProcessor:
                 return result
 
             wb = EnhancedExcelOptimizer.safe_excel_operation(lambda: app.books.open(filepath))
+            
+            # Apply memory optimizations for large files
+            MemoryOptimizer.optimize_workbook_for_large_files(wb)
 
             # chọn sheet
             try:
@@ -107,7 +111,10 @@ class EnhancedExcelProcessor:
                 return result
 
             print("   📊 Reading sheet data...")
+            start_memory = MemoryOptimizer.get_memory_usage()
             headers, data = self._batch_read_enhanced(sheet, header_row)
+            end_memory = MemoryOptimizer.get_memory_usage()
+            print(f"   📈 Data read completed: {end_memory - start_memory:+.1f}MB memory change")
             if not data:
                 result.error_message = "No data rows found"
                 wb.close()
@@ -119,6 +126,7 @@ class EnhancedExcelProcessor:
             print("   💾 Saving workbook...")
             wb.save()
             wb.close()
+            MemoryOptimizer.cleanup_memory()
 
             result.status = 'success'
             result.rows_updated = rows_updated
@@ -143,14 +151,13 @@ class EnhancedExcelProcessor:
 
     # ---------- IO helpers ----------
     def _batch_read_enhanced(self, sheet: xw.Sheet, header_row: int) -> Tuple[List[str], List[List]]:
-        # Xác định used range an toàn
+        # Optimized batch reading for large files
         try:
             used = EnhancedExcelOptimizer.safe_excel_operation(lambda: sheet.used_range)
             last_cell = EnhancedExcelOptimizer.safe_excel_operation(lambda: used.last_cell)
             last_row = int(last_cell.row)
             last_col = int(last_cell.column)
         except Exception:
-            # fallback như file gốc
             last_row, last_col = 500, 50
 
         print(f"   📐 Used range: Row {header_row}..{last_row}, Col 1..{last_col}")
@@ -160,7 +167,7 @@ class EnhancedExcelProcessor:
         )
         headers = [str(h).strip() if h else f'Col_{i}' for i, h in enumerate(headers_raw)]
 
-        # Đổi tên cột Rent trùng
+        # Rename duplicate Rent columns
         rent_idx = [i for i, h in enumerate(headers) if h == 'Rent']
         if len(rent_idx) >= 2:
             headers[rent_idx[0]] = 'Rent (USD)'
@@ -169,21 +176,37 @@ class EnhancedExcelProcessor:
 
         data = []
         if last_row > header_row:
-            step = 100
-            r = header_row + 1
-            while r <= last_row:
-                r2 = min(r + step - 1, last_row)
-                chunk = EnhancedExcelOptimizer.safe_excel_operation(
-                    lambda rr=r, rr2=r2: sheet.range((rr, 1), (rr2, last_col)).value
+            # Optimized: Read entire data range in one operation for better performance
+            try:
+                print("   ⚡ Reading entire data range at once...")
+                all_data = EnhancedExcelOptimizer.safe_excel_operation(
+                    lambda: sheet.range((header_row + 1, 1), (last_row, last_col)).value
                 )
-                if chunk:
-                    if not isinstance(chunk, list):
-                        chunk = [chunk]
-                    elif len(chunk) > 0 and not isinstance(chunk[0], list):
-                        chunk = [chunk]
-                    data.extend(chunk)
-                r = r2 + 1
-                time.sleep(0.01)
+                if all_data:
+                    if not isinstance(all_data, list):
+                        data = [all_data]
+                    elif len(all_data) > 0 and not isinstance(all_data[0], list):
+                        data = [all_data]
+                    else:
+                        data = all_data
+            except Exception as e:
+                print(f"   ⚠️ Bulk read failed, falling back to chunked read: {e}")
+                # Fallback with optimized chunk size (500 rows, no sleep)
+                step = 500
+                r = header_row + 1
+                while r <= last_row:
+                    r2 = min(r + step - 1, last_row)
+                    chunk = EnhancedExcelOptimizer.safe_excel_operation(
+                        lambda rr=r, rr2=r2: sheet.range((rr, 1), (rr2, last_col)).value
+                    )
+                    if chunk:
+                        if not isinstance(chunk, list):
+                            chunk = [chunk]
+                        elif len(chunk) > 0 and not isinstance(chunk[0], list):
+                            chunk = [chunk]
+                        data.extend(chunk)
+                    r = r2 + 1
+        
         print(f"   📚 Read {len(headers)} columns, {len(data)} rows")
         return headers, data
 
@@ -236,14 +259,48 @@ class EnhancedExcelProcessor:
 
         rows_updated = 0
         if write_pairs:
-            write_pairs.sort(key=lambda x: x[0])
-            for excel_row, vals in write_pairs:
-                try:
-                    sheet.range((excel_row, 1), (excel_row, len(headers))).value = vals
-                    rows_updated += 1
-                except Exception as e:
-                    print(f"     ⚠️ Update row {excel_row}: {e}")
-            print(f"   → Updated {rows_updated} existing rows with summary data")
+            # Optimized: Batch write all updates at once
+            try:
+                write_pairs.sort(key=lambda x: x[0])
+                print(f"   ⚡ Batch updating {len(write_pairs)} rows...")
+                
+                # Group consecutive rows for range-based updates
+                batch_groups = []
+                current_group = []
+                for excel_row, vals in write_pairs:
+                    if not current_group or excel_row == current_group[-1][0] + 1:
+                        current_group.append((excel_row, vals))
+                    else:
+                        batch_groups.append(current_group)
+                        current_group = [(excel_row, vals)]
+                if current_group:
+                    batch_groups.append(current_group)
+                
+                for group in batch_groups:
+                    if len(group) == 1:
+                        # Single row update
+                        excel_row, vals = group[0]
+                        sheet.range((excel_row, 1), (excel_row, len(headers))).value = vals
+                        rows_updated += 1
+                    else:
+                        # Multi-row batch update
+                        start_row = group[0][0]
+                        end_row = group[-1][0]
+                        batch_data = [vals for _, vals in group]
+                        sheet.range((start_row, 1), (end_row, len(headers))).value = batch_data
+                        rows_updated += len(group)
+                        
+                print(f"   → Updated {rows_updated} existing rows with summary data")
+            except Exception as e:
+                print(f"   ⚠️ Batch update failed, falling back to row-by-row: {e}")
+                # Fallback to original method
+                for excel_row, vals in write_pairs:
+                    try:
+                        sheet.range((excel_row, 1), (excel_row, len(headers))).value = vals
+                        rows_updated += 1
+                    except Exception as e:
+                        print(f"     ⚠️ Update row {excel_row}: {e}")
+                print(f"   → Updated {rows_updated} existing rows with summary data")
         else:
             print("   → No existing rows matched for update.")
 
@@ -293,12 +350,48 @@ class EnhancedExcelProcessor:
                         new_vals.append(self._ensure_scalar(val))
                     fill_pairs.append((excel_row, new_vals))
 
-                for excel_row, vals in fill_pairs:
-                    try:
-                        sheet.range((excel_row, 1), (excel_row, len(headers))).value = vals
-                        rows_added += 1
-                    except Exception as e:
-                        print(f"     ⚠️ Fill row {excel_row}: {e}")
+                # Optimized: Batch write all fills at once
+                try:
+                    print(f"   ⚡ Batch filling {len(fill_pairs)} rows...")
+                    
+                    # Group consecutive rows for range-based fills
+                    fill_groups = []
+                    current_group = []
+                    fill_pairs.sort(key=lambda x: x[0])
+                    
+                    for excel_row, vals in fill_pairs:
+                        if not current_group or excel_row == current_group[-1][0] + 1:
+                            current_group.append((excel_row, vals))
+                        else:
+                            fill_groups.append(current_group)
+                            current_group = [(excel_row, vals)]
+                    if current_group:
+                        fill_groups.append(current_group)
+                    
+                    for group in fill_groups:
+                        if len(group) == 1:
+                            # Single row fill
+                            excel_row, vals = group[0]
+                            sheet.range((excel_row, 1), (excel_row, len(headers))).value = vals
+                            rows_added += 1
+                        else:
+                            # Multi-row batch fill
+                            start_row = group[0][0]
+                            end_row = group[-1][0]
+                            batch_data = [vals for _, vals in group]
+                            sheet.range((start_row, 1), (end_row, len(headers))).value = batch_data
+                            rows_added += len(group)
+                            
+                except Exception as e:
+                    print(f"   ⚠️ Batch fill failed, falling back to row-by-row: {e}")
+                    # Fallback to original method
+                    for excel_row, vals in fill_pairs:
+                        try:
+                            sheet.range((excel_row, 1), (excel_row, len(headers))).value = vals
+                            rows_added += 1
+                        except Exception as e:
+                            print(f"     ⚠️ Fill row {excel_row}: {e}")
+                            
                 print(f"   → Filled {rows_added} empty green rows")
             else:
                 print("   ⚠️ No empty green rows to fill")

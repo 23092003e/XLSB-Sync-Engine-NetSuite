@@ -32,7 +32,7 @@ class RobustBatchProcessor:
                     break
                 COMManager.kill_excel_processes(); time.sleep(1)
             results.append(result)
-            gc.collect(); time.sleep(0.5)
+            gc.collect(); time.sleep(0.1)  # Reduced delay between files
         return results
 
     def process_files_parallel_conservative(self, file_paths: List[str], summary_path: str) -> List[ProcessingResult]:
@@ -67,7 +67,7 @@ class RobustBatchProcessor:
             all_results.extend(batch_results)
             if bi < len(batches)-1:
                 print("   🧹 Cleaning up between batches...")
-                COMManager.kill_excel_processes(); gc.collect(); time.sleep(2)
+                COMManager.kill_excel_processes(); gc.collect(); time.sleep(1)  # Reduced cleanup delay
         return all_results
 
     def _process_with_retry(self, processor: EnhancedExcelProcessor, filepath: str) -> ProcessingResult:
@@ -75,11 +75,11 @@ class RobustBatchProcessor:
         for attempt in range(self.config.retry_attempts):
             if attempt > 0:
                 print(f"   🔄 Retrying {os.path.basename(filepath)} (attempt {attempt+1})")
-                time.sleep(1)
+                time.sleep(0.5)  # Reduced retry delay
             res = processor.process_single_file_enhanced(filepath)
             if res.status == 'success':
                 return res
-            COMManager.kill_excel_processes(); time.sleep(0.5)
+            COMManager.kill_excel_processes(); time.sleep(0.2)  # Reduced process kill delay
         return res
 
     def print_enhanced_summary(self, results: List[ProcessingResult]):

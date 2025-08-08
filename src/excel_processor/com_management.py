@@ -37,15 +37,18 @@ class EnhancedExcelOptimizer:
                 if not COMManager.initialize_com():
                     continue
                 app = xw.App(visible=False, add_book=False)
-                time.sleep(0.5)
+                time.sleep(0.2)  # Reduced wait time
                 _ = app.version  # test
                 try:
+                    # Optimized Excel settings for performance
                     app.screen_updating = False
                     app.display_alerts = False
                     app.enable_events = False
+                    app.calculation = 'manual'  # Disable auto-calculation
+                    app.interactive = False     # Disable user interaction
                 except Exception as e:
                     print(f"Warning: set Excel props failed: {e}")
-                print(f"   📱 Excel initialized (attempt {attempt+1})")
+                print(f"   📱 Excel initialized with optimizations (attempt {attempt+1})")
                 return app
             except Exception as e:
                 print(f"   ⚠️ Excel setup attempt {attempt+1} failed: {e}")
@@ -53,7 +56,7 @@ class EnhancedExcelOptimizer:
                     if app: app.quit()
                 except: pass
                 app = None
-                time.sleep((attempt+1) * 0.5)
+                time.sleep((attempt+1) * 0.2)  # Reduced retry delay
         return None
 
     @staticmethod
@@ -64,7 +67,7 @@ class EnhancedExcelOptimizer:
             except Exception as e:
                 if retry == 1:
                     raise e
-                time.sleep(0.1)
+                time.sleep(0.05)  # Reduced retry delay
                 gc.collect()
 
     @staticmethod
