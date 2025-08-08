@@ -211,3 +211,5 @@ __marimo__/
 # Ignore the following files and directories
 
 data/
+.serena/
+.claude/
