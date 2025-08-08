@@ -39,15 +39,36 @@ class EnhancedExcelOptimizer:
                 app = xw.App(visible=False, add_book=False)
                 time.sleep(0.2)  # Reduced wait time
                 _ = app.version  # test
+                # Set Excel properties individually with error handling
                 try:
-                    # Optimized Excel settings for performance
                     app.screen_updating = False
-                    app.display_alerts = False
-                    app.enable_events = False
-                    app.calculation = 'manual'  # Disable auto-calculation
-                    app.interactive = False     # Disable user interaction
                 except Exception as e:
-                    print(f"Warning: set Excel props failed: {e}")
+                    print(f"Warning: screen_updating failed: {e}")
+                
+                try:
+                    app.display_alerts = False
+                except Exception as e:
+                    print(f"Warning: display_alerts failed: {e}")
+                
+                try:
+                    app.enable_events = False
+                except Exception as e:
+                    print(f"Warning: enable_events failed: {e}")
+                
+                try:
+                    app.calculation = 'manual'
+                except Exception as e:
+                    print(f"Warning: calculation setting failed: {e}")
+                    # Try alternative approach
+                    try:
+                        app.calculation = -4135  # xlCalculationManual constant
+                    except Exception as e2:
+                        print(f"Warning: alternative calculation setting failed: {e2}")
+                
+                try:
+                    app.interactive = False
+                except Exception as e:
+                    print(f"Warning: interactive setting failed: {e}")
                 print(f"   📱 Excel initialized with optimizations (attempt {attempt+1})")
                 return app
             except Exception as e:

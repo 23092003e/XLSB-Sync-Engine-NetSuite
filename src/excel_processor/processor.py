@@ -151,17 +151,30 @@ class EnhancedExcelProcessor:
 
     # ---------- IO helpers ----------
     def _batch_read_enhanced(self, sheet: xw.Sheet, header_row: int) -> Tuple[List[str], List[List]]:
-        # Optimized batch reading for large files
+        # Optimized batch reading for large files - LIMITED TO ROWS 1-300, COLUMNS 1-40
+        
+        # Set explicit limits instead of using entire used range
+        max_row = 300
+        max_col = 40
+        
         try:
             used = EnhancedExcelOptimizer.safe_excel_operation(lambda: sheet.used_range)
             last_cell = EnhancedExcelOptimizer.safe_excel_operation(lambda: used.last_cell)
-            last_row = int(last_cell.row)
-            last_col = int(last_cell.column)
+            actual_last_row = int(last_cell.row)
+            actual_last_col = int(last_cell.column)
+            
+            # Apply our limits
+            last_row = min(actual_last_row, max_row)
+            last_col = min(actual_last_col, max_col)
+            
+            print(f"   📊 Actual used range: Row {header_row}..{actual_last_row}, Col 1..{actual_last_col}")
+            print(f"   🎯 Limited range: Row {header_row}..{last_row}, Col 1..{last_col}")
         except Exception:
-            last_row, last_col = 500, 50
+            # Use our limits as fallback
+            last_row, last_col = min(500, max_row), min(50, max_col)
+            print(f"   ⚠️ Could not determine used range, using fallback limits: Row {header_row}..{last_row}, Col 1..{last_col}")
 
-        print(f"   📐 Used range: Row {header_row}..{last_row}, Col 1..{last_col}")
-
+        # Read headers within our column limit
         headers_raw = EnhancedExcelOptimizer.safe_excel_operation(
             lambda: sheet.range((header_row, 1), (header_row, last_col)).value
         )
@@ -176,9 +189,9 @@ class EnhancedExcelProcessor:
 
         data = []
         if last_row > header_row:
-            # Optimized: Read entire data range in one operation for better performance
+            # Optimized: Read limited data range in one operation for better performance
             try:
-                print("   ⚡ Reading entire data range at once...")
+                print("   ⚡ Reading limited data range at once...")
                 all_data = EnhancedExcelOptimizer.safe_excel_operation(
                     lambda: sheet.range((header_row + 1, 1), (last_row, last_col)).value
                 )
@@ -191,7 +204,7 @@ class EnhancedExcelProcessor:
                         data = all_data
             except Exception as e:
                 print(f"   ⚠️ Bulk read failed, falling back to chunked read: {e}")
-                # Fallback with optimized chunk size (500 rows, no sleep)
+                # Fallback with optimized chunk size (500 rows, no sleep) but respect limits
                 step = 500
                 r = header_row + 1
                 while r <= last_row:
@@ -207,7 +220,7 @@ class EnhancedExcelProcessor:
                         data.extend(chunk)
                     r = r2 + 1
         
-        print(f"   📚 Read {len(headers)} columns, {len(data)} rows")
+        print(f"   📚 Read {len(headers)} columns, {len(data)} rows (limited to first 300 rows, 40 columns)")
         return headers, data
 
     # ---------- business logic ----------
