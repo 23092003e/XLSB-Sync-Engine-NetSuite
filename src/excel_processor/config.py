@@ -31,11 +31,11 @@ def get_optimal_worker_count() -> int:
     # Get available memory in GB
     memory_gb = psutil.virtual_memory().total / (1024**3)
     
-    # Calculate based on cores and memory
-    # Rule: 1-2 workers per physical core, but limited by memory
-    # Each Excel instance needs ~500MB-1GB memory
-    max_workers_by_cpu = min(cpu_cores * 2, 16)  # Cap at 16 workers
-    max_workers_by_memory = max(2, int(memory_gb / 0.8))  # 800MB per worker
+    # FIXED: Conservative approach for Excel COM objects
+    # Excel instances are heavy and don't parallelize well with threading
+    # Use 1 worker per 2 cores, maximum 4 workers for stability
+    max_workers_by_cpu = min(max(1, cpu_cores // 2), 4)  # Conservative: max 4 workers
+    max_workers_by_memory = max(1, int(memory_gb / 2))  # 2GB per worker (more realistic)
     
     optimal_workers = min(max_workers_by_cpu, max_workers_by_memory)
     

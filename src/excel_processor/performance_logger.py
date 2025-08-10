@@ -30,6 +30,8 @@ class PerformanceMetrics:
 class PerformanceLogger:
     def __init__(self, log_file: str = "performance_log.json"):
         self.log_file = Path(log_file)
+        # Create parent directory if it doesn't exist
+        self.log_file.parent.mkdir(parents=True, exist_ok=True)
         self.active_operations: Dict[str, PerformanceMetrics] = {}
         
     def start_operation(self, operation_id: str, operation_name: str, 

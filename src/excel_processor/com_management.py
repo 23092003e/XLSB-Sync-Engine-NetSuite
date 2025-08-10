@@ -7,12 +7,22 @@ class COMManager:
     _com_initialized = False
     _active_apps = {}  # Pool of Excel applications
     _app_usage_count = {}  # Track usage for cleanup
+    _pool_lock = None  # Thread synchronization lock
     
+    @staticmethod
+    def _get_lock():
+        """Get or create thread lock for pool operations"""
+        import threading
+        if COMManager._pool_lock is None:
+            COMManager._pool_lock = threading.RLock()
+        return COMManager._pool_lock
+
     @staticmethod
     def initialize_com() -> bool:
         try:
             if not COMManager._com_initialized:
-                pythoncom.CoInitialize()
+                # FIXED: Use apartment threading for Excel COM objects
+                pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
                 COMManager._com_initialized = True
             return True
         except Exception as e:
@@ -33,63 +43,76 @@ class COMManager:
 
     @staticmethod
     def get_or_create_excel_app(app_id: str = None) -> xw.App:
-        """Get existing Excel app from pool or create new one"""
-        if app_id is None:
-            app_id = f"app_{len(COMManager._active_apps)}"
-            
-        if app_id in COMManager._active_apps:
-            app = COMManager._active_apps[app_id]
-            try:
-                # Test if app is still alive
-                _ = app.version
-                COMManager._app_usage_count[app_id] = COMManager._app_usage_count.get(app_id, 0) + 1
-                return app
-            except:
-                # App is dead, remove from pool
-                COMManager._active_apps.pop(app_id, None)
-                COMManager._app_usage_count.pop(app_id, None)
+        """Get existing Excel app from pool or create new one (thread-safe)"""
+        import threading
+        import time
         
-        # Create new app
+        if app_id is None:
+            # Use thread ID to avoid conflicts
+            app_id = f"app_thread_{threading.current_thread().ident}"
+            
+        with COMManager._get_lock():
+            if app_id in COMManager._active_apps:
+                app = COMManager._active_apps[app_id]
+                try:
+                    # Test if app is still alive
+                    _ = app.version
+                    COMManager._app_usage_count[app_id] = COMManager._app_usage_count.get(app_id, 0) + 1
+                    return app
+                except:
+                    # App is dead, remove from pool
+                    COMManager._active_apps.pop(app_id, None)
+                    COMManager._app_usage_count.pop(app_id, None)
+            
+            # Create new app (release lock temporarily to avoid blocking other threads)
+            
+        # Initialize COM for this thread
+        COMManager.initialize_com()
+        time.sleep(0.1)  # Small delay to prevent COM conflicts
+        
         app = EnhancedExcelOptimizer.setup_excel_app_robust()
         if app:
-            COMManager._active_apps[app_id] = app
-            COMManager._app_usage_count[app_id] = 1
-            print(f"   [POOL] Created new Excel app: {app_id} (Pool size: {len(COMManager._active_apps)})")
+            with COMManager._get_lock():
+                COMManager._active_apps[app_id] = app
+                COMManager._app_usage_count[app_id] = 1
+                print(f"   [POOL] Created new Excel app: {app_id} (Pool size: {len(COMManager._active_apps)})")
         
         return app
 
     @staticmethod
     def release_excel_app(app_id: str):
-        """Release Excel app back to pool (or close if overused)"""
-        if app_id not in COMManager._active_apps:
-            return
+        """Release Excel app back to pool (or close if overused) - thread-safe"""
+        with COMManager._get_lock():
+            if app_id not in COMManager._active_apps:
+                return
+                
+            usage_count = COMManager._app_usage_count.get(app_id, 0)
             
-        usage_count = COMManager._app_usage_count.get(app_id, 0)
-        
-        # Close app if it's been used too many times to prevent memory leaks
-        if usage_count > 50:
-            try:
-                app = COMManager._active_apps[app_id]
-                app.quit()
-                print(f"   [POOL] Closed overused Excel app: {app_id} (used {usage_count} times)")
-            except Exception as e:
-                print(f"   [WARNING] Error closing Excel app {app_id}: {e}")
-            finally:
-                COMManager._active_apps.pop(app_id, None)
-                COMManager._app_usage_count.pop(app_id, None)
+            # Close app if it's been used too many times to prevent memory leaks
+            if usage_count > 20:  # Reduced threshold for COM stability
+                try:
+                    app = COMManager._active_apps[app_id]
+                    app.quit()
+                    print(f"   [POOL] Closed overused Excel app: {app_id} (used {usage_count} times)")
+                except Exception as e:
+                    print(f"   [WARNING] Error closing Excel app {app_id}: {e}")
+                finally:
+                    COMManager._active_apps.pop(app_id, None)
+                    COMManager._app_usage_count.pop(app_id, None)
 
     @staticmethod
     def cleanup_all_excel_apps():
-        """Clean up all Excel applications in the pool"""
-        for app_id, app in list(COMManager._active_apps.items()):
-            try:
-                app.quit()
-                print(f"   [CLEANUP] Cleaned up Excel app: {app_id}")
-            except Exception as e:
-                print(f"   [WARNING] Error cleaning up Excel app {app_id}: {e}")
-        
-        COMManager._active_apps.clear()
-        COMManager._app_usage_count.clear()
+        """Clean up all Excel applications in the pool - thread-safe"""
+        with COMManager._get_lock():
+            for app_id, app in list(COMManager._active_apps.items()):
+                try:
+                    app.quit()
+                    print(f"   [CLEANUP] Cleaned up Excel app: {app_id}")
+                except Exception as e:
+                    print(f"   [WARNING] Error cleaning up Excel app {app_id}: {e}")
+            
+            COMManager._active_apps.clear()
+            COMManager._app_usage_count.clear()
 
     @staticmethod
     def kill_excel_processes():
@@ -101,12 +124,13 @@ class COMManager:
 
     @staticmethod
     def get_pool_stats():
-        """Get statistics about the Excel application pool"""
-        return {
-            'active_apps': len(COMManager._active_apps),
-            'total_usage': sum(COMManager._app_usage_count.values()),
-            'apps': dict(COMManager._app_usage_count)
-        }
+        """Get statistics about the Excel application pool - thread-safe"""
+        with COMManager._get_lock():
+            return {
+                'active_apps': len(COMManager._active_apps),
+                'total_usage': sum(COMManager._app_usage_count.values()),
+                'apps': dict(COMManager._app_usage_count)
+            }
 
 class EnhancedExcelOptimizer:
     @staticmethod
