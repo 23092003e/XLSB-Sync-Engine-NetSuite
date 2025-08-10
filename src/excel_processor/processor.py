@@ -9,6 +9,11 @@ from .com_management import COMManager, EnhancedExcelOptimizer
 from .subsidiary import SubsidiaryExtractor
 from .memory_optimizer import MemoryOptimizer
 
+# Import the new modules
+from .exceptions import *
+from .retry_utils import safe_excel_operation_with_retry, retry_on_failure, RetryConfig
+from .performance_logger import performance_logger, log_performance
+
 class EnhancedExcelProcessor:
     def __init__(self, config: ProcessingConfig):
         self.config = config
@@ -60,6 +65,7 @@ class EnhancedExcelProcessor:
         return pd.DataFrame()
 
     # ---------- CORE PER-FILE ----------
+    @log_performance("process_single_file")
     def process_single_file_enhanced(self, filepath: str) -> ProcessingResult:
         start = time.time()
         result = ProcessingResult(filepath=filepath, status='error')
@@ -72,12 +78,18 @@ class EnhancedExcelProcessor:
                 return result
 
             print(f"\n🔄 Processing: {filepath}")
-            app = EnhancedExcelOptimizer.setup_excel_app_robust()
+            # Use connection pooling for better resource management
+            app_id = f"worker_{hash(filepath) % 100}"  # Distribute files across app pool
+            app = COMManager.get_or_create_excel_app(app_id)
             if not app:
                 result.error_message = "Could not initialize Excel application"
                 return result
 
-            wb = EnhancedExcelOptimizer.safe_excel_operation(lambda: app.books.open(filepath))
+            wb = safe_excel_operation_with_retry(
+                lambda: app.books.open(filepath), 
+                "Open workbook", 
+                max_attempts=3
+            )
             
             # Apply memory optimizations for large files
             MemoryOptimizer.optimize_workbook_for_large_files(wb)
@@ -142,45 +154,65 @@ class EnhancedExcelProcessor:
             except: pass
         finally:
             try:
-                if app: app.quit()
+                # Release app back to pool instead of quitting
+                if app and 'app_id' in locals():
+                    COMManager.release_excel_app(app_id)
+                else:
+                    # Fallback cleanup for apps not from pool
+                    if app: app.quit()
             except Exception as e:
                 print(f"   ⚠️ Excel cleanup warning: {e}")
-            time.sleep(0.5)
-            COMManager.cleanup_com()
+            time.sleep(0.1)  # Reduced cleanup delay
         return result
 
     # ---------- IO helpers ----------
     def _batch_read_enhanced(self, sheet: xw.Sheet, header_row: int) -> Tuple[List[str], List[List]]:
-        # Optimized batch reading for large files - LIMITED TO ROWS 1-300, COLUMNS 1-40
-        
-        # Set explicit limits instead of using entire used range
-        max_row = 300
-        max_col = 40
-        
+        """
+        Enhanced batch reading for large files with dynamic size calculation
+        Removed artificial 300-row, 40-column limits for 20MB file support
+        """
         try:
+            # Get actual used range without artificial limits
             used = EnhancedExcelOptimizer.safe_excel_operation(lambda: sheet.used_range)
             last_cell = EnhancedExcelOptimizer.safe_excel_operation(lambda: used.last_cell)
             actual_last_row = int(last_cell.row)
             actual_last_col = int(last_cell.column)
             
-            # Apply our limits
-            last_row = min(actual_last_row, max_row)
-            last_col = min(actual_last_col, max_col)
+            print(f"   📊 Full used range detected: Row {header_row}..{actual_last_row}, Col 1..{actual_last_col}")
             
-            print(f"   📊 Actual used range: Row {header_row}..{actual_last_row}, Col 1..{actual_last_col}")
-            print(f"   🎯 Limited range: Row {header_row}..{last_row}, Col 1..{last_col}")
-        except Exception:
-            # Use our limits as fallback
-            last_row, last_col = min(500, max_row), min(50, max_col)
-            print(f"   ⚠️ Could not determine used range, using fallback limits: Row {header_row}..{last_row}, Col 1..{last_col}")
+            # Calculate dynamic limits based on available memory
+            available_memory_mb = MemoryOptimizer.get_available_memory()
+            estimated_cell_size_bytes = 50  # Average bytes per cell (text/number)
+            max_cells_for_memory = int((available_memory_mb * 0.3 * 1024 * 1024) / estimated_cell_size_bytes)
+            
+            # Dynamic row/column calculation
+            if actual_last_col <= 50:  # Small width files
+                max_rows_for_memory = min(max_cells_for_memory // actual_last_col, 100000)
+            else:  # Wide files
+                max_rows_for_memory = min(max_cells_for_memory // actual_last_col, 50000)
+                
+            # Use actual size but respect memory limits
+            last_row = min(actual_last_row, max_rows_for_memory + header_row)
+            last_col = actual_last_col
+            
+            if last_row < actual_last_row:
+                print(f"   ⚠️ Memory constraint: Processing {last_row - header_row} of {actual_last_row - header_row} data rows")
+            else:
+                print(f"   ✅ Processing all {actual_last_row - header_row} data rows")
+                
+        except Exception as e:
+            # Fallback to reasonable defaults if range detection fails
+            print(f"   ⚠️ Could not determine used range: {e}")
+            last_row, last_col = header_row + 10000, 100  # Much higher fallback limits
+            print(f"   🔄 Using fallback limits: Row {header_row}..{last_row}, Col 1..{last_col}")
 
-        # Read headers within our column limit
+        # Read headers with dynamic column range
         headers_raw = EnhancedExcelOptimizer.safe_excel_operation(
             lambda: sheet.range((header_row, 1), (header_row, last_col)).value
         )
         headers = [str(h).strip() if h else f'Col_{i}' for i, h in enumerate(headers_raw)]
 
-        # Rename duplicate Rent columns
+        # Handle duplicate Rent columns
         rent_idx = [i for i, h in enumerate(headers) if h == 'Rent']
         if len(rent_idx) >= 2:
             headers[rent_idx[0]] = 'Rent (USD)'
@@ -189,39 +221,76 @@ class EnhancedExcelProcessor:
 
         data = []
         if last_row > header_row:
-            # Optimized: Read limited data range in one operation for better performance
-            try:
-                print("   ⚡ Reading limited data range at once...")
-                all_data = EnhancedExcelOptimizer.safe_excel_operation(
-                    lambda: sheet.range((header_row + 1, 1), (last_row, last_col)).value
-                )
-                if all_data:
-                    if not isinstance(all_data, list):
-                        data = [all_data]
-                    elif len(all_data) > 0 and not isinstance(all_data[0], list):
-                        data = [all_data]
-                    else:
-                        data = all_data
-            except Exception as e:
-                print(f"   ⚠️ Bulk read failed, falling back to chunked read: {e}")
-                # Fallback with optimized chunk size (500 rows, no sleep) but respect limits
-                step = 500
-                r = header_row + 1
-                while r <= last_row:
-                    r2 = min(r + step - 1, last_row)
-                    chunk = EnhancedExcelOptimizer.safe_excel_operation(
-                        lambda rr=r, rr2=r2: sheet.range((rr, 1), (rr2, last_col)).value
+            total_rows = last_row - header_row
+            
+            # Use chunked reading for large datasets
+            if total_rows > self.config.chunk_size:
+                print(f"   📦 Using chunked reading: {self.config.chunk_size} rows per chunk")
+                data = self._read_data_chunked(sheet, header_row + 1, last_row, last_col)
+            else:
+                # Single read for smaller datasets
+                try:
+                    print(f"   ⚡ Reading {total_rows} rows at once...")
+                    all_data = EnhancedExcelOptimizer.safe_excel_operation(
+                        lambda: sheet.range((header_row + 1, 1), (last_row, last_col)).value
                     )
-                    if chunk:
-                        if not isinstance(chunk, list):
-                            chunk = [chunk]
-                        elif len(chunk) > 0 and not isinstance(chunk[0], list):
-                            chunk = [chunk]
-                        data.extend(chunk)
-                    r = r2 + 1
+                    if all_data:
+                        if not isinstance(all_data, list):
+                            data = [all_data]
+                        elif len(all_data) > 0 and not isinstance(all_data[0], list):
+                            data = [all_data]
+                        else:
+                            data = all_data
+                except Exception as e:
+                    print(f"   ⚠️ Bulk read failed, falling back to chunked read: {e}")
+                    data = self._read_data_chunked(sheet, header_row + 1, last_row, last_col)
         
-        print(f"   📚 Read {len(headers)} columns, {len(data)} rows (limited to first 300 rows, 40 columns)")
+        print(f"   📚 Read {len(headers)} columns, {len(data)} rows (no artificial limits)")
         return headers, data
+
+    def _read_data_chunked(self, sheet: xw.Sheet, start_row: int, end_row: int, last_col: int) -> List[List]:
+        """Read data in chunks to handle large files efficiently"""
+        data = []
+        chunk_size = self.config.chunk_size
+        
+        r = start_row
+        chunk_count = 0
+        while r <= end_row:
+            # Check memory pressure before each chunk
+            if MemoryOptimizer.check_memory_pressure():
+                print("   ⚠️ Memory pressure detected, reducing chunk size")
+                chunk_size = max(chunk_size // 2, 500)
+                MemoryOptimizer.cleanup_memory()
+            
+            r2 = min(r + chunk_size - 1, end_row)
+            chunk_count += 1
+            
+            try:
+                print(f"   📦 Reading chunk {chunk_count}: rows {r}-{r2}")
+                chunk = EnhancedExcelOptimizer.safe_excel_operation(
+                    lambda rr=r, rr2=r2: sheet.range((rr, 1), (rr2, last_col)).value
+                )
+                
+                if chunk:
+                    if not isinstance(chunk, list):
+                        chunk = [chunk]
+                    elif len(chunk) > 0 and not isinstance(chunk[0], list):
+                        chunk = [chunk]
+                    data.extend(chunk)
+                    
+            except Exception as e:
+                print(f"   ❌ Chunk {chunk_count} failed: {e}")
+                # Try smaller chunk on failure
+                if chunk_size > 100:
+                    chunk_size = chunk_size // 2
+                    continue
+                else:
+                    break
+                    
+            r = r2 + 1
+            
+        print(f"   ✅ Completed chunked reading: {chunk_count} chunks, {len(data)} total rows")
+        return data
 
     # ---------- business logic ----------
     def _process_dataframe_enhanced(
@@ -318,9 +387,12 @@ class EnhancedExcelProcessor:
             print("   → No existing rows matched for update.")
 
         # fill các dòng “green” trống còn lại bằng summary chưa dùng
+        # Enhanced auto-fill logic with dynamic row creation
         unmatched_summary = summary_subset.loc[~summary_subset.index.isin(updated_summary_indices)]
         rows_added = 0
+        
         if not unmatched_summary.empty:
+            # Find existing empty green rows
             empty_green_mask = (
                 (df['Item2'].astype(str).str.strip() == 'Leasing period') &
                 (df['Note'].astype(str).str.strip() == 'Committed') &
@@ -329,7 +401,46 @@ class EnhancedExcelProcessor:
                  (df['Tenant name'].astype(str).str.strip() == ''))
             )
             empty_green_rows = df[empty_green_mask]
-            print(f"   → Empty green rows: {len(empty_green_rows)} | Unmatched summary: {len(unmatched_summary)}")
+            
+            unmatched_count = len(unmatched_summary)
+            empty_count = len(empty_green_rows)
+            
+            print(f"   → Empty green rows: {empty_count} | Unmatched summary: {unmatched_count}")
+            
+            # Auto-add more empty green rows if needed
+            if empty_count < unmatched_count:
+                rows_to_add = unmatched_count - empty_count
+                print(f"   🔄 Auto-adding {rows_to_add} empty green rows to match unmatched summary")
+                
+                # Find the last row in the sheet to add new rows
+                try:
+                    last_used_row = sheet.used_range.last_cell.row
+                    rows_added += self._add_empty_green_rows(sheet, last_used_row + 1, rows_to_add, headers)
+                    
+                    # Update the dataframe to include new rows for processing
+                    for i in range(rows_to_add):
+                        new_row_data = [''] * len(headers)
+                        # Set the required green row identifiers
+                        if 'Item2' in headers:
+                            new_row_data[headers.index('Item2')] = 'Leasing period'
+                        if 'Note' in headers:
+                            new_row_data[headers.index('Note')] = 'Committed'
+                        df.loc[len(df)] = new_row_data
+                    
+                    # Recalculate empty green rows with the new rows
+                    empty_green_mask = (
+                        (df['Item2'].astype(str).str.strip() == 'Leasing period') &
+                        (df['Note'].astype(str).str.strip() == 'Committed') &
+                        ((df['Factory code'].astype(str).str.strip() == '') |
+                         (df['Tenant code'].astype(str).str.strip() == '') |
+                         (df['Tenant name'].astype(str).str.strip() == ''))
+                    )
+                    empty_green_rows = df[empty_green_mask]
+                    print(f"   ✅ Updated empty green rows: {len(empty_green_rows)}")
+                    
+                except Exception as e:
+                    print(f"   ⚠️ Could not auto-add green rows: {e}")
+                    # Continue with existing empty rows
 
             if len(empty_green_rows) > 0:
                 empty_excel_rows = [header_row + 1 + idx for idx in empty_green_rows.index.tolist()]
@@ -422,3 +533,30 @@ class EnhancedExcelProcessor:
         if pd.isna(val):
             return ''
         return val
+
+    def _add_empty_green_rows(self, sheet: xw.Sheet, start_row: int, count: int, headers: List[str]) -> int:
+        """Add empty green rows to the sheet for auto-fill functionality"""
+        try:
+            rows_added = 0
+            for i in range(count):
+                row_num = start_row + i
+                
+                # Create empty row data with proper identifiers
+                row_data = [''] * len(headers)
+                
+                # Set the required green row identifiers
+                if 'Item2' in headers:
+                    row_data[headers.index('Item2')] = 'Leasing period'
+                if 'Note' in headers:
+                    row_data[headers.index('Note')] = 'Committed'
+                
+                # Write the row to Excel
+                sheet.range((row_num, 1), (row_num, len(headers))).value = row_data
+                rows_added += 1
+                
+            print(f"   ➕ Added {rows_added} empty green rows at row {start_row}")
+            return rows_added
+            
+        except Exception as e:
+            print(f"   ❌ Failed to add empty green rows: {e}")
+            return 0
