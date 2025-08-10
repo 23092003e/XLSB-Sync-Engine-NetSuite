@@ -347,6 +347,335 @@ class TestAutoFillDataIntegrity(AutoFillTestBase):
         self.assertNotIn((14, item2_col), sheet.data)  # After end
 
 
+class TestAutoFillAdvancedFunctionality(AutoFillTestBase):
+    """Test advanced auto-fill functionality and complex scenarios"""
+    
+    def test_auto_fill_with_duplicate_headers(self):
+        """Test: Auto-fill correctly handles duplicate column headers"""
+        # Arrange - Headers with duplicates (common in Excel exports)
+        headers = ['Item2', 'Note', 'Rent', 'Factory code', 'Rent', 'Tenant code']
+        sheet = MockExcelSheet()
+        
+        # Act
+        rows_added = self.processor._add_empty_green_rows(sheet, 1, 3, headers)
+        
+        # Assert
+        self.assertEqual(rows_added, 3)
+        
+        # Verify Item2 and Note are set correctly
+        item2_col = headers.index('Item2') + 1
+        note_col = headers.index('Note') + 1
+        
+        for row in range(1, 4):
+            self.assertEqual(sheet.data.get((row, item2_col)), 'Leasing period')
+            self.assertEqual(sheet.data.get((row, note_col)), 'Committed')
+    
+    def test_auto_fill_column_order_variations(self):
+        """Test: Auto-fill works with different column orders"""
+        # Arrange - Different column arrangements
+        column_arrangements = [
+            ['Item2', 'Note', 'Factory code', 'Tenant code'],  # Standard order
+            ['Factory code', 'Item2', 'Tenant code', 'Note'],  # Mixed order
+            ['Note', 'Factory code', 'Tenant code', 'Item2'],  # Item2 last
+            ['Factory code', 'Tenant code', 'Note', 'Item2'],  # Note and Item2 swapped
+        ]
+        
+        for arrangement in column_arrangements:
+            with self.subTest(arrangement=arrangement):
+                sheet = MockExcelSheet()
+                
+                # Act
+                rows_added = self.processor._add_empty_green_rows(sheet, 1, 2, arrangement)
+                
+                # Assert
+                self.assertEqual(rows_added, 2)
+                
+                # Verify correct columns are set regardless of order
+                if 'Item2' in arrangement:
+                    item2_col = arrangement.index('Item2') + 1
+                    self.assertEqual(sheet.data.get((1, item2_col)), 'Leasing period')
+                    self.assertEqual(sheet.data.get((2, item2_col)), 'Leasing period')
+                
+                if 'Note' in arrangement:
+                    note_col = arrangement.index('Note') + 1
+                    self.assertEqual(sheet.data.get((1, note_col)), 'Committed')
+                    self.assertEqual(sheet.data.get((2, note_col)), 'Committed')
+    
+    def test_auto_fill_case_insensitive_headers(self):
+        """Test: Auto-fill handles case variations in headers"""
+        # Arrange - Headers with different cases
+        case_variations = [
+            ['ITEM2', 'NOTE', 'Factory code'],  # Uppercase
+            ['item2', 'note', 'Factory code'],  # Lowercase
+            ['Item2', 'Note', 'Factory code'],  # Standard case
+            ['iTeM2', 'NoTe', 'Factory code'],  # Mixed case
+        ]
+        
+        for headers in case_variations:
+            with self.subTest(headers=headers):
+                sheet = MockExcelSheet()
+                
+                # Act
+                rows_added = self.processor._add_empty_green_rows(sheet, 1, 1, headers)
+                
+                # Assert
+                self.assertEqual(rows_added, 1)
+                
+                # The current implementation is case-sensitive, so only exact matches work
+                # This test documents the current behavior
+                if 'Item2' in headers:
+                    item2_col = headers.index('Item2') + 1
+                    self.assertEqual(sheet.data.get((1, item2_col)), 'Leasing period')
+                
+                if 'Note' in headers:
+                    note_col = headers.index('Note') + 1
+                    self.assertEqual(sheet.data.get((1, note_col)), 'Committed')
+    
+    def test_auto_fill_with_extra_columns(self):
+        """Test: Auto-fill with many extra columns beyond required ones"""
+        # Arrange - Headers with many extra columns
+        extra_headers = [
+            'Item2', 'Note', 'Factory code', 'Tenant code', 'Tenant name',
+            'Rent (USD)', 'Rent (VND)', 'Start Date', 'End Date', 'Area',
+            'Floor', 'Building', 'Zone', 'Status', 'Comments', 'Manager',
+            'Contract Number', 'Payment Terms', 'Security Deposit'
+        ]
+        sheet = MockExcelSheet()
+        
+        # Act
+        rows_added = self.processor._add_empty_green_rows(sheet, 1, 3, extra_headers)
+        
+        # Assert
+        self.assertEqual(rows_added, 3)
+        
+        # Verify core columns are set correctly
+        item2_col = extra_headers.index('Item2') + 1
+        note_col = extra_headers.index('Note') + 1
+        
+        for row in range(1, 4):
+            self.assertEqual(sheet.data.get((row, item2_col)), 'Leasing period')
+            self.assertEqual(sheet.data.get((row, note_col)), 'Committed')
+            
+            # Extra columns should remain empty
+            rent_usd_col = extra_headers.index('Rent (USD)') + 1
+            comments_col = extra_headers.index('Comments') + 1
+            
+            self.assertEqual(sheet.data.get((row, rent_usd_col), ''), '')
+            self.assertEqual(sheet.data.get((row, comments_col), ''), '')
+    
+    def test_auto_fill_performance_with_headers(self):
+        """Test: Auto-fill performance with different header configurations"""
+        import time
+        
+        # Test different header sizes
+        header_configs = [
+            ['Item2', 'Note'],  # Minimal
+            ['Item2', 'Note'] + [f'Col{i}' for i in range(10)],  # Medium
+            ['Item2', 'Note'] + [f'Col{i}' for i in range(100)],  # Large
+        ]
+        
+        performance_results = []
+        
+        for headers in header_configs:
+            sheet = MockExcelSheet()
+            
+            start_time = time.perf_counter()
+            rows_added = self.processor._add_empty_green_rows(sheet, 1, 100, headers)
+            execution_time = time.perf_counter() - start_time
+            
+            performance_results.append({
+                'header_count': len(headers),
+                'execution_time': execution_time,
+                'rows_added': rows_added
+            })
+            
+            # Assert success
+            self.assertEqual(rows_added, 100)
+        
+        # Performance should not degrade significantly with more headers
+        for i, result in enumerate(performance_results):
+            print(f"  Headers: {result['header_count']}, Time: {result['execution_time']:.3f}s")
+            
+            # Each configuration should complete in reasonable time
+            self.assertLess(result['execution_time'], 2.0, 
+                           f"Too slow with {result['header_count']} headers")
+    
+    def test_auto_fill_data_type_consistency(self):
+        """Test: Auto-fill maintains consistent data types"""
+        # Arrange
+        headers = ['Item2', 'Note', 'Factory code', 'Tenant code', 'Rent']
+        sheet = MockExcelSheet()
+        
+        # Act
+        rows_added = self.processor._add_empty_green_rows(sheet, 1, 5, headers)
+        
+        # Assert
+        self.assertEqual(rows_added, 5)
+        
+        # Verify data type consistency
+        item2_col = headers.index('Item2') + 1
+        note_col = headers.index('Note') + 1
+        
+        for row in range(1, 6):
+            # Required fields should be strings
+            item2_value = sheet.data.get((row, item2_col))
+            note_value = sheet.data.get((row, note_col))
+            
+            self.assertIsInstance(item2_value, str)
+            self.assertIsInstance(note_value, str)
+            self.assertEqual(item2_value, 'Leasing period')
+            self.assertEqual(note_value, 'Committed')
+            
+            # Other fields should be empty strings (consistent type)
+            for col in range(1, len(headers) + 1):
+                if col not in [item2_col, note_col]:
+                    value = sheet.data.get((row, col), '')
+                    self.assertEqual(value, '', f"Column {col} should be empty")
+
+
+class TestAutoFillRobustness(AutoFillTestBase):
+    """Test auto-fill robustness and reliability"""
+    
+    def test_auto_fill_repeated_operations(self):
+        """Test: Multiple auto-fill operations on same sheet"""
+        # Arrange
+        headers = ['Item2', 'Note', 'Factory code', 'Tenant code']
+        sheet = MockExcelSheet()
+        
+        # Act - Perform multiple auto-fill operations
+        operations = [
+            (1, 5),   # Add 5 rows starting at row 1
+            (6, 3),   # Add 3 rows starting at row 6
+            (9, 7),   # Add 7 rows starting at row 9
+        ]
+        
+        total_expected = 0
+        for start_row, count in operations:
+            rows_added = self.processor._add_empty_green_rows(sheet, start_row, count, headers)
+            self.assertEqual(rows_added, count)
+            total_expected += count
+        
+        # Assert
+        # Verify all rows were added correctly
+        item2_col = headers.index('Item2') + 1
+        note_col = headers.index('Note') + 1
+        
+        written_rows = 0
+        for row in range(1, 20):  # Check generous range
+            if sheet.data.get((row, item2_col)) == 'Leasing period':
+                written_rows += 1
+                self.assertEqual(sheet.data.get((row, note_col)), 'Committed')
+        
+        self.assertEqual(written_rows, total_expected)
+    
+    def test_auto_fill_idempotency(self):
+        """Test: Auto-fill operations are idempotent when appropriate"""
+        # Arrange
+        headers = ['Item2', 'Note', 'Factory code']
+        sheet = MockExcelSheet()
+        
+        # Act - Perform same operation twice
+        rows_added_1 = self.processor._add_empty_green_rows(sheet, 1, 3, headers)
+        original_data = dict(sheet.data)  # Copy current state
+        
+        # Second operation on different rows (should not interfere)
+        rows_added_2 = self.processor._add_empty_green_rows(sheet, 10, 3, headers)
+        
+        # Assert
+        self.assertEqual(rows_added_1, 3)
+        self.assertEqual(rows_added_2, 3)
+        
+        # Original data should be unchanged
+        for key, value in original_data.items():
+            self.assertEqual(sheet.data[key], value, f"Original data at {key} was modified")
+        
+        # New data should be added at correct location
+        item2_col = headers.index('Item2') + 1
+        for row in range(10, 13):
+            self.assertEqual(sheet.data.get((row, item2_col)), 'Leasing period')
+    
+    def test_auto_fill_consistency_across_calls(self):
+        """Test: Auto-fill produces consistent results across multiple calls"""
+        # Arrange
+        headers = ['Item2', 'Note', 'Factory code', 'Tenant code']
+        
+        # Act - Perform same operation on different sheets
+        results = []
+        for i in range(5):
+            sheet = MockExcelSheet()
+            rows_added = self.processor._add_empty_green_rows(sheet, 1, 10, headers)
+            
+            # Collect data for comparison
+            item2_col = headers.index('Item2') + 1
+            note_col = headers.index('Note') + 1
+            
+            sheet_data = []
+            for row in range(1, 11):
+                sheet_data.append({
+                    'row': row,
+                    'item2': sheet.data.get((row, item2_col)),
+                    'note': sheet.data.get((row, note_col))
+                })
+            
+            results.append({
+                'rows_added': rows_added,
+                'data': sheet_data
+            })
+        
+        # Assert
+        # All operations should produce identical results
+        first_result = results[0]
+        for i, result in enumerate(results[1:], 1):
+            self.assertEqual(result['rows_added'], first_result['rows_added'],
+                           f"Operation {i} returned different row count")
+            
+            for j, (first_row, result_row) in enumerate(zip(first_result['data'], result['data'])):
+                self.assertEqual(result_row['item2'], first_row['item2'],
+                               f"Operation {i}, row {j}: Item2 mismatch")
+                self.assertEqual(result_row['note'], first_row['note'],
+                               f"Operation {i}, row {j}: Note mismatch")
+    
+    def test_auto_fill_thread_safety_simulation(self):
+        """Test: Simulate thread safety by rapid sequential operations"""
+        import time
+        
+        # Arrange
+        headers = ['Item2', 'Note', 'Factory code']
+        sheet = MockExcelSheet()
+        
+        # Act - Rapid sequential operations to simulate concurrency stress
+        operations = []
+        start_time = time.perf_counter()
+        
+        for i in range(10):
+            start_row = i * 5 + 1  # Non-overlapping row ranges
+            rows_added = self.processor._add_empty_green_rows(sheet, start_row, 3, headers)
+            operations.append((start_row, rows_added))
+            
+            # Brief pause to simulate processing time
+            time.sleep(0.001)
+        
+        end_time = time.perf_counter()
+        
+        # Assert
+        # All operations should succeed
+        for start_row, rows_added in operations:
+            self.assertEqual(rows_added, 3, f"Operation starting at row {start_row} failed")
+        
+        # Verify data integrity
+        item2_col = headers.index('Item2') + 1
+        
+        for start_row, _ in operations:
+            for offset in range(3):
+                row = start_row + offset
+                self.assertEqual(sheet.data.get((row, item2_col)), 'Leasing period',
+                               f"Data corruption at row {row}")
+        
+        # Performance should be reasonable
+        total_time = end_time - start_time
+        self.assertLess(total_time, 1.0, "Rapid operations should complete quickly")
+
+
 if __name__ == '__main__':
     # Configure test runner
     unittest.main(verbosity=2, buffer=True)

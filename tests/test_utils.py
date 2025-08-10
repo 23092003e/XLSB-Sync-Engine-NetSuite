@@ -285,3 +285,362 @@ def create_large_test_data(rows: int = 1000) -> pd.DataFrame:
             'Subsidiary': f'Sub{random.randint(1,5)}'
         })
     return pd.DataFrame(data)
+
+
+class MockCOMManager:
+    """Mock COM Manager for testing Excel COM operations"""
+    
+    def __init__(self, success_rate: float = 1.0):
+        self.success_rate = success_rate
+        self.excel_apps = {}
+        self.com_initialized = False
+        self.operation_count = 0
+    
+    def initialize_com(self) -> bool:
+        """Mock COM initialization"""
+        self.operation_count += 1
+        if self._should_succeed():
+            self.com_initialized = True
+            return True
+        return False
+    
+    def get_or_create_excel_app(self, app_id: str) -> Optional[MockExcelApp]:
+        """Mock Excel application creation/retrieval"""
+        self.operation_count += 1
+        if not self._should_succeed():
+            return None
+        
+        if app_id not in self.excel_apps:
+            self.excel_apps[app_id] = MockExcelApp()
+        return self.excel_apps[app_id]
+    
+    def release_excel_app(self, app_id: str) -> bool:
+        """Mock Excel application release"""
+        self.operation_count += 1
+        if app_id in self.excel_apps and self._should_succeed():
+            self.excel_apps[app_id].quit()
+            del self.excel_apps[app_id]
+            return True
+        return False
+    
+    def cleanup_all_apps(self):
+        """Mock cleanup of all Excel applications"""
+        self.operation_count += 1
+        if self._should_succeed():
+            for app in self.excel_apps.values():
+                app.quit()
+            self.excel_apps.clear()
+    
+    def _should_succeed(self) -> bool:
+        """Determine if operation should succeed based on success rate"""
+        import random
+        return random.random() < self.success_rate
+
+
+class MockMemoryOptimizer:
+    """Mock Memory Optimizer for testing memory-related operations"""
+    
+    def __init__(self, available_memory: float = 2000.0, pressure_threshold: float = 1500.0):
+        self.available_memory = available_memory
+        self.pressure_threshold = pressure_threshold
+        self.current_usage = 500.0
+        self.cleanup_count = 0
+        self.pressure_checks = 0
+    
+    def get_memory_usage(self) -> float:
+        """Mock current memory usage"""
+        return self.current_usage
+    
+    def get_available_memory(self) -> float:
+        """Mock available memory"""
+        return self.available_memory
+    
+    def check_memory_pressure(self) -> bool:
+        """Mock memory pressure check"""
+        self.pressure_checks += 1
+        return self.current_usage > self.pressure_threshold
+    
+    def cleanup_memory(self) -> None:
+        """Mock memory cleanup"""
+        self.cleanup_count += 1
+        # Simulate memory cleanup reducing usage
+        self.current_usage = max(100.0, self.current_usage * 0.7)
+    
+    def optimize_workbook_for_large_files(self, workbook) -> None:
+        """Mock workbook optimization"""
+        pass
+    
+    def simulate_memory_usage_increase(self, amount: float):
+        """Simulate increase in memory usage for testing"""
+        self.current_usage += amount
+        if self.current_usage > self.available_memory:
+            self.current_usage = self.available_memory
+    
+    def reset_memory_state(self):
+        """Reset to initial state for testing"""
+        self.current_usage = 500.0
+        self.cleanup_count = 0
+        self.pressure_checks = 0
+
+
+class MockPerformanceLogger:
+    """Mock Performance Logger for testing performance monitoring"""
+    
+    def __init__(self):
+        self.operations = []
+        self.active_operations = {}
+    
+    def log_performance(self, operation_name: str):
+        """Mock performance logging decorator"""
+        def decorator(func):
+            def wrapper(*args, **kwargs):
+                import time
+                start_time = time.perf_counter()
+                
+                try:
+                    result = func(*args, **kwargs)
+                    success = True
+                    error = None
+                except Exception as e:
+                    result = None
+                    success = False
+                    error = str(e)
+                    raise
+                finally:
+                    end_time = time.perf_counter()
+                    execution_time = end_time - start_time
+                    
+                    self.operations.append({
+                        'operation': operation_name,
+                        'start_time': start_time,
+                        'end_time': end_time,
+                        'execution_time': execution_time,
+                        'success': success,
+                        'error': error
+                    })
+                
+                return result
+            return wrapper
+        return decorator
+    
+    def start_operation(self, operation_name: str, **metadata):
+        """Mock start of performance tracking"""
+        import time
+        self.active_operations[operation_name] = {
+            'start_time': time.perf_counter(),
+            'metadata': metadata
+        }
+    
+    def end_operation(self, operation_name: str, success: bool = True, **result_data):
+        """Mock end of performance tracking"""
+        import time
+        if operation_name in self.active_operations:
+            start_info = self.active_operations.pop(operation_name)
+            end_time = time.perf_counter()
+            
+            self.operations.append({
+                'operation': operation_name,
+                'start_time': start_info['start_time'],
+                'end_time': end_time,
+                'execution_time': end_time - start_info['start_time'],
+                'success': success,
+                'metadata': start_info['metadata'],
+                'result_data': result_data
+            })
+    
+    def get_operation_stats(self, operation_name: str = None) -> Dict[str, Any]:
+        """Get statistics for logged operations"""
+        if operation_name:
+            ops = [op for op in self.operations if op['operation'] == operation_name]
+        else:
+            ops = self.operations
+        
+        if not ops:
+            return {}
+        
+        execution_times = [op['execution_time'] for op in ops]
+        return {
+            'count': len(ops),
+            'total_time': sum(execution_times),
+            'avg_time': sum(execution_times) / len(execution_times),
+            'min_time': min(execution_times),
+            'max_time': max(execution_times),
+            'success_rate': sum(1 for op in ops if op['success']) / len(ops)
+        }
+
+
+class MockRetryUtils:
+    """Mock retry utilities for testing retry logic"""
+    
+    def __init__(self, max_attempts: int = 3, delay: float = 0.1):
+        self.max_attempts = max_attempts
+        self.delay = delay
+        self.attempt_counts = {}
+    
+    def safe_excel_operation_with_retry(self, operation_func, operation_name: str, 
+                                      max_attempts: Optional[int] = None):
+        """Mock retry logic for Excel operations"""
+        max_attempts = max_attempts or self.max_attempts
+        operation_key = f"{operation_name}_{id(operation_func)}"
+        
+        if operation_key not in self.attempt_counts:
+            self.attempt_counts[operation_key] = 0
+        
+        for attempt in range(max_attempts):
+            self.attempt_counts[operation_key] += 1
+            
+            try:
+                return operation_func()
+            except Exception as e:
+                if attempt == max_attempts - 1:
+                    # Last attempt, re-raise the exception
+                    raise
+                
+                # Simulate delay between retries
+                import time
+                time.sleep(self.delay)
+        
+        raise RuntimeError(f"All {max_attempts} attempts failed for {operation_name}")
+    
+    def get_attempt_count(self, operation_name: str, operation_func) -> int:
+        """Get the number of attempts made for a specific operation"""
+        operation_key = f"{operation_name}_{id(operation_func)}"
+        return self.attempt_counts.get(operation_key, 0)
+    
+    def reset_counts(self):
+        """Reset attempt counts for testing"""
+        self.attempt_counts.clear()
+
+
+class EnhancedMockExcelSheet(MockExcelSheet):
+    """Enhanced mock Excel sheet with more realistic COM behaviors"""
+    
+    def __init__(self, used_range_rows: int = 100, used_range_cols: int = 20,
+                 failure_rate: float = 0.0, slow_operations: bool = False):
+        super().__init__(used_range_rows, used_range_cols)
+        self.failure_rate = failure_rate
+        self.slow_operations = slow_operations
+        self.operation_count = 0
+        self.last_error = None
+    
+    def range(self, start, end=None):
+        """Enhanced range method with failure simulation"""
+        self.operation_count += 1
+        
+        # Simulate operation failures
+        if self._should_fail():
+            error_types = [
+                Exception("COM Error: The object invoked has disconnected from its clients"),
+                MemoryError("Insufficient memory for operation"),
+                TimeoutError("Operation timed out"),
+                PermissionError("Access denied - sheet may be protected"),
+                RuntimeError("Excel application is busy")
+            ]
+            
+            import random
+            error = random.choice(error_types)
+            self.last_error = error
+            raise error
+        
+        # Simulate slow operations
+        if self.slow_operations:
+            import time
+            time.sleep(0.01)  # 10ms delay
+        
+        return super().range(start, end)
+    
+    def _should_fail(self) -> bool:
+        """Determine if operation should fail based on failure rate"""
+        import random
+        return random.random() < self.failure_rate
+    
+    def set_failure_rate(self, rate: float):
+        """Adjust failure rate for testing different scenarios"""
+        self.failure_rate = max(0.0, min(1.0, rate))
+    
+    def enable_slow_operations(self, enabled: bool = True):
+        """Enable/disable slow operation simulation"""
+        self.slow_operations = enabled
+    
+    def get_operation_stats(self) -> Dict[str, Any]:
+        """Get statistics about operations performed"""
+        return {
+            'total_operations': self.operation_count,
+            'data_cells_written': len(self.data),
+            'last_error': str(self.last_error) if self.last_error else None,
+            'failure_rate': self.failure_rate
+        }
+
+
+class TestScenarioBuilder:
+    """Helper class to build complex test scenarios"""
+    
+    @staticmethod
+    def create_memory_pressure_scenario(processor_config: ProcessingConfig) -> Dict[str, Any]:
+        """Create a scenario that simulates memory pressure"""
+        mock_memory = MockMemoryOptimizer(available_memory=500.0, pressure_threshold=300.0)
+        mock_memory.simulate_memory_usage_increase(400.0)  # Start near pressure
+        
+        return {
+            'memory_optimizer': mock_memory,
+            'config': processor_config,
+            'expected_pressure': True,
+            'expected_cleanups': lambda: mock_memory.cleanup_count > 0
+        }
+    
+    @staticmethod
+    def create_com_failure_scenario(failure_rate: float = 0.3) -> Dict[str, Any]:
+        """Create a scenario with intermittent COM failures"""
+        mock_com = MockCOMManager(success_rate=1.0 - failure_rate)
+        mock_sheet = EnhancedMockExcelSheet(failure_rate=failure_rate)
+        
+        return {
+            'com_manager': mock_com,
+            'sheet': mock_sheet,
+            'expected_failures': True,
+            'failure_rate': failure_rate
+        }
+    
+    @staticmethod
+    def create_large_dataset_scenario(rows: int = 5000, cols: int = 50) -> Dict[str, Any]:
+        """Create a scenario with large dataset processing"""
+        large_summary = create_large_test_data(rows)
+        headers = ['Item2', 'Note'] + [f'Col_{i}' for i in range(cols - 2)]
+        
+        # Create Excel data with mixed content
+        excel_data = []
+        for i in range(min(1000, rows // 5)):  # Subset for Excel sheet
+            if i % 10 < 2:  # 20% are empty green rows
+                row = ['Leasing period', 'Committed'] + [''] * (cols - 2)
+            elif i % 10 < 4:  # 20% are filled green rows
+                row = ['Leasing period', 'Committed', f'Factory{i:02d}', f'T{i:03d}'] + [''] * (cols - 4)
+            else:  # 60% are other data
+                row = ['Other Item', 'Other Note'] + [f'Data_{i}_{j}' for j in range(cols - 2)]
+            excel_data.append(row)
+        
+        return {
+            'summary_data': large_summary,
+            'excel_data': excel_data,
+            'headers': headers,
+            'expected_auto_fill': True,
+            'size_category': 'large' if rows > 1000 else 'medium'
+        }
+    
+    @staticmethod
+    def create_performance_benchmark_scenario() -> Dict[str, Any]:
+        """Create a scenario for performance benchmarking"""
+        mock_perf = MockPerformanceLogger()
+        
+        # Define performance targets
+        targets = {
+            'rows_per_second_min': 100,
+            'memory_per_row_max_mb': 0.01,
+            'max_execution_time_1000_rows': 10.0
+        }
+        
+        return {
+            'performance_logger': mock_perf,
+            'performance_targets': targets,
+            'benchmark_sizes': [100, 500, 1000, 2000],
+            'expected_scaling': 'linear'
+        }
