@@ -828,7 +828,11 @@ class EnhancedExcelProcessor:
         else:
             print("   → No unmatched summary rows to fill")
 
+
+
         return rows_updated, rows_added
+
+
 
     @staticmethod
     def _ensure_scalar(val):
