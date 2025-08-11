@@ -24,26 +24,288 @@ class EnhancedExcelProcessor:
     # ---------- SUMMARY ----------
     def load_summary_data_enhanced(self, summary_path: str):
         print("📊 Loading and analyzing summary data...")
-        self.summary_data = pd.read_excel(summary_path, dtype=str).fillna('')
+        
+        # First, validate file exists and basic format
+        import os
+        if not os.path.exists(summary_path):
+            raise FileNotFoundError(f"Summary file not found: {summary_path}")
+        
+        file_size = os.path.getsize(summary_path)
+        if file_size == 0:
+            raise ValueError(f"Summary file is empty: {summary_path}")
+        
+        print(f"   📁 File: {os.path.basename(summary_path)} ({file_size:,} bytes)")
+        
+        # Check file signature to detect actual format
+        def detect_file_format(filepath):
+            try:
+                with open(filepath, 'rb') as f:
+                    header = f.read(512)  # Read more bytes for better detection
+                    
+                if header.startswith(b'PK\x03\x04'):
+                    return 'xlsx'  # ZIP-based format (xlsx, xlsm)
+                elif header.startswith(b'\xd0\xcf\x11\xe0'):
+                    return 'xls'   # OLE2/CFB format (xls)
+                elif header.startswith(b'<?xml'):
+                    # Check if it's Excel XML format
+                    header_str = header.decode('utf-8', errors='ignore')
+                    if 'xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"' in header_str:
+                        return 'excel_xml'  # Excel XML Spreadsheet
+                    else:
+                        return 'xml'   # Generic XML format
+                else:
+                    return 'unknown'
+            except:
+                return 'unknown'
+        
+        actual_format = detect_file_format(summary_path)
+        file_ext = os.path.splitext(summary_path.lower())[1]
+        
+        print(f"   🔍 File extension: {file_ext}, Detected format: {actual_format}")
+        
+        # Handle Excel XML format specially
+        if actual_format == 'excel_xml':
+            try:
+                print("   🔧 Detected Excel XML format - using custom XML parser")
+                import xml.etree.ElementTree as ET
+                
+                # Parse Excel XML format
+                tree = ET.parse(summary_path)
+                root = tree.getroot()
+                
+                # Find worksheets and data
+                ns = {'ss': 'urn:schemas-microsoft-com:office:spreadsheet'}
+                worksheets = root.findall('.//ss:Worksheet', ns)
+                
+                if not worksheets:
+                    raise ValueError("No worksheets found in Excel XML file")
+                
+                # Use first worksheet (or find by name if specified)
+                worksheet = worksheets[0]
+                worksheet_name = worksheet.get('{urn:schemas-microsoft-com:office:spreadsheet}Name', 'Sheet1')
+                print(f"   📋 Using worksheet: {worksheet_name}")
+                
+                # Get table data
+                table = worksheet.find('.//ss:Table', ns)
+                if table is None:
+                    raise ValueError("No table found in worksheet")
+                
+                rows = table.findall('.//ss:Row', ns)
+                
+                # Extract data from XML with better cell handling
+                data_rows = []
+                headers = None
+                
+                for row_idx, row_elem in enumerate(rows):
+                    cells = row_elem.findall('.//ss:Cell', ns)
+                    row_data = []
+                    current_col = 0
+                    
+                    for cell in cells:
+                        # Handle cell index (Excel XML can have sparse cells)
+                        cell_index = cell.get('{urn:schemas-microsoft-com:office:spreadsheet}Index')
+                        if cell_index:
+                            target_col = int(cell_index) - 1  # Convert to 0-based
+                            # Fill gaps with empty strings
+                            while current_col < target_col:
+                                row_data.append('')
+                                current_col += 1
+                        
+                        # Extract cell value
+                        data_elem = cell.find('.//ss:Data', ns)
+                        if data_elem is not None and data_elem.text:
+                            cell_value = str(data_elem.text).strip()
+                        else:
+                            cell_value = ''
+                        
+                        row_data.append(cell_value)
+                        current_col += 1
+                    
+                    # Skip completely empty rows
+                    if any(cell.strip() for cell in row_data if cell):
+                        if headers is None and row_data:
+                            headers = row_data
+                            print(f"   📋 Found headers: {len(headers)} columns")
+                            # Show first few column names for debugging
+                            preview_cols = headers[:5] + (['...'] if len(headers) > 5 else [])
+                            print(f"   🔍 Column preview: {preview_cols}")
+                        elif headers is not None:
+                            # Ensure row has same length as headers
+                            while len(row_data) < len(headers):
+                                row_data.append('')
+                            data_rows.append(row_data[:len(headers)])  # Trim if too long
+                
+                if not headers:
+                    raise ValueError("No headers found in Excel XML file")
+                
+                if not data_rows:
+                    raise ValueError("No data rows found in Excel XML file")
+                
+                # Create DataFrame
+                self.summary_data = pd.DataFrame(data_rows, columns=headers).fillna('').astype(str)
+                print(f"   ✅ Successfully loaded Excel XML: {len(data_rows)} rows × {len(headers)} columns")
+                
+                # Debug: Print actual column names to help identify the issue
+                print(f"   🔍 Loaded columns: {list(self.summary_data.columns)}")
+                
+                # Check for 'Subsidiary' column with different variations
+                subsidiary_cols = [col for col in self.summary_data.columns if 'subsidiary' in col.lower()]
+                if subsidiary_cols:
+                    print(f"   ✅ Found subsidiary column(s): {subsidiary_cols}")
+                else:
+                    print(f"   ⚠️  No 'Subsidiary' column found. Available columns: {list(self.summary_data.columns)[:10]}")
+                
+            except Exception as e:
+                print(f"   ❌ Excel XML parsing failed: {str(e)}")
+                # Fallback to trying pandas engines
+                actual_format = 'xml'
+                if hasattr(self, 'summary_data'):
+                    delattr(self, 'summary_data')
+        
+        # For non-Excel XML formats, use pandas engines
+        if actual_format != 'excel_xml' or not hasattr(self, 'summary_data') or self.summary_data is None:
+            # Determine engines to try based on detected format
+            engines_to_try = []
+            
+            if actual_format == 'xlsx':
+                engines_to_try = ['openpyxl']
+            elif actual_format == 'xls':
+                engines_to_try = ['xlrd']
+            elif actual_format == 'xml':
+                # For XML files, try engines that might handle XML
+                engines_to_try = ['openpyxl', 'xlrd']
+            else:
+                # Unknown format - try all engines
+                if file_ext == '.xls':
+                    engines_to_try = ['xlrd', 'openpyxl']
+                elif file_ext == '.xlsx':
+                    engines_to_try = ['openpyxl']
+                elif file_ext == '.xlsb':
+                    engines_to_try = ['pyxlsb', 'openpyxl']
+                else:
+                    engines_to_try = ['openpyxl', 'xlrd', 'pyxlsb']
+            
+            # Try each engine until one works
+            last_error = None
+            successful_engine = None
+            
+            for engine in engines_to_try:
+                try:
+                    print(f"   🔧 Trying engine: {engine}")
+                    self.summary_data = pd.read_excel(summary_path, dtype=str, engine=engine).fillna('')
+                    successful_engine = engine
+                    print(f"   ✅ Successfully loaded with {engine} engine")
+                    print(f"   🔍 Pandas loaded columns: {list(self.summary_data.columns)[:10]}")
+                    break
+                except Exception as e:
+                    error_msg = str(e)
+                    print(f"   ❌ {engine} failed: {error_msg[:100]}...")
+                    last_error = e
+                    continue
+            
+            if successful_engine is None and not hasattr(self, 'summary_data'):
+                # Provide detailed error message with file analysis
+                error_details = [
+                    f"\n❌ SUMMARY FILE LOADING FAILED",
+                    f"File: {summary_path}",
+                    f"File size: {file_size:,} bytes",
+                    f"Extension: {file_ext}",
+                    f"Detected format: {actual_format}",
+                    f"Engines tried: {', '.join(engines_to_try)}",
+                    f"Last error: {str(last_error)}"
+                ]
+                
+                # Provide helpful suggestions
+                suggestions = [
+                    "\n💡 POSSIBLE SOLUTIONS:",
+                    "1. Check if the file is corrupted or incomplete",
+                    "2. Try opening the file in Excel to verify it's valid",
+                    "3. Resave the file as a proper Excel format (.xlsx recommended)",
+                    "4. For XML Excel files, ensure proper XML structure",
+                    "5. Try converting to .xlsx format in Excel: File > Save As > Excel Workbook",
+                    "6. Check file permissions and access rights"
+                ]
+                
+                if "zip file" in str(last_error).lower():
+                    suggestions.append("7. File appears corrupted - the Excel file structure is damaged")
+                
+                if actual_format == 'xml':
+                    suggestions.append("8. XML format detected - try opening in Excel and saving as .xlsx")
+                
+                full_error = "\n".join(error_details + suggestions)
+                raise Exception(full_error)
 
-        subsidiaries = self.summary_data['Subsidiary'].unique()
+        # Validate loaded data structure
+        if self.summary_data.empty:
+            raise ValueError(f"Summary file loaded successfully but contains no data")
+        
+        print(f"   📊 Final data shape: {self.summary_data.shape[0]} rows × {self.summary_data.shape[1]} columns")
+        
+        # Check for required columns with flexible matching
+        required_columns = ['Subsidiary', 'Unit name', 'Tenant ID', 'Tenant']
+        available_columns = list(self.summary_data.columns)
+        
+        # Try to find columns with flexible matching
+        column_mapping = {}
+        for req_col in required_columns:
+            # Exact match first
+            if req_col in available_columns:
+                column_mapping[req_col] = req_col
+                continue
+            
+            # Case-insensitive match
+            matches = [col for col in available_columns if col.lower() == req_col.lower()]
+            if matches:
+                column_mapping[req_col] = matches[0]
+                continue
+                
+            # Partial match (contains the required column name)
+            matches = [col for col in available_columns if req_col.lower() in col.lower()]
+            if matches:
+                column_mapping[req_col] = matches[0]
+                print(f"   🔄 Mapped '{req_col}' to '{matches[0]}'")
+                continue
+        
+        missing_columns = [col for col in required_columns if col not in column_mapping]
+        if missing_columns:
+            print(f"   ⚠️  Missing expected columns: {missing_columns}")
+            print(f"   📋 Available columns: {available_columns[:20]}")
+            # Don't fail, just warn - the process might still work
+        
+        # Use mapped column names for processing
+        if 'Subsidiary' in column_mapping:
+            subsidiary_col = column_mapping['Subsidiary']
+            subsidiaries = self.summary_data[subsidiary_col].unique()
+        else:
+            print("   ⚠️  No Subsidiary column found - using first column as subsidiary")
+            subsidiary_col = available_columns[0] if available_columns else 'Column1'
+            subsidiaries = self.summary_data[subsidiary_col].unique() if subsidiary_col in self.summary_data.columns else []
+        
         for sub in subsidiaries:
-            if pd.notna(sub) and sub.strip():
-                clean = sub.strip().upper()
-                self.subsidiary_variations[clean] = sub
+            if pd.notna(sub) and str(sub).strip():
+                clean = str(sub).strip().upper()
+                self.subsidiary_variations[clean] = str(sub)
                 if '-' in clean:
-                    self.subsidiary_variations[clean.split('-')[0].strip()] = sub
+                    self.subsidiary_variations[clean.split('-')[0].strip()] = str(sub)
 
+        # Build lookup with mapped column names
+        unit_name_col = column_mapping.get('Unit name', 'Unit name')
+        tenant_id_col = column_mapping.get('Tenant ID', 'Tenant ID')
+        tenant_col = column_mapping.get('Tenant', 'Tenant')
+        
         self.summary_lookup = {}
         for idx, row in self.summary_data.iterrows():
-            k1 = f"{row['Unit name'].strip()}|{row['Tenant ID'].strip()}"
-            k2 = f"{row['Unit name'].strip()}|{row['Tenant'].strip()}"
+            unit_name = str(row.get(unit_name_col, '')).strip()
+            tenant_id = str(row.get(tenant_id_col, '')).strip()
+            tenant = str(row.get(tenant_col, '')).strip()
+            
+            k1 = f"{unit_name}|{tenant_id}"
+            k2 = f"{unit_name}|{tenant}"
             self.summary_lookup[k1] = (idx, row.to_dict())
             self.summary_lookup[k2] = (idx, row.to_dict())
 
         print(f"   ✅ Loaded {len(self.summary_data)} summary records")
-        print(f"   ✅ Created {len(self.summary_lookup)} lookup keys")
-
+        print(f"   ✅ Created {len(self.summary_lookup)} lookup keys")    
     def get_subsidiary_subset(self, extracted_subsidiary: str) -> pd.DataFrame:
         if not extracted_subsidiary:
             return self.summary_data
@@ -407,25 +669,69 @@ class EnhancedExcelProcessor:
             
             print(f"   → Empty green rows: {empty_count} | Unmatched summary: {unmatched_count}")
             
-            # Auto-add more empty green rows if needed
+            # Auto-add more empty green rows if needed (with double buffer for future growth)
             if empty_count < unmatched_count:
-                rows_to_add = unmatched_count - empty_count
-                print(f"   🔄 Auto-adding {rows_to_add} empty green rows to match unmatched summary")
+                # Calculate rows needed with buffer
+                base_rows_needed = unmatched_count - empty_count
+                buffer_rows = max(base_rows_needed, 10)  # Double buffer, minimum 10 rows
+                total_rows_to_add = base_rows_needed + buffer_rows
                 
-                # Find the last row in the sheet to add new rows
+                print(f"   🔄 Auto-adding {total_rows_to_add} green rows ({base_rows_needed} needed + {buffer_rows} buffer)")
+                
+                # Find the best insertion point: right after the last existing green row
                 try:
-                    last_used_row = sheet.used_range.last_cell.row
-                    rows_added += self._add_empty_green_rows(sheet, last_used_row + 1, rows_to_add, headers)
+                    # Find all existing green rows to determine insertion point
+                    green_mask = (
+                        (df['Item2'].astype(str).str.strip() == 'Leasing period') &
+                        (df['Note'].astype(str).str.strip() == 'Committed')
+                    )
+                    green_indices = df[green_mask].index.tolist()
                     
-                    # Update the dataframe to include new rows for processing
-                    for i in range(rows_to_add):
-                        new_row_data = [''] * len(headers)
-                        # Set the required green row identifiers
-                        if 'Item2' in headers:
-                            new_row_data[headers.index('Item2')] = 'Leasing period'
-                        if 'Note' in headers:
-                            new_row_data[headers.index('Note')] = 'Committed'
-                        df.loc[len(df)] = new_row_data
+                    if green_indices:
+                        # Insert after the last green row
+                        last_green_df_idx = max(green_indices)
+                        insertion_excel_row = header_row + 1 + last_green_df_idx
+                        
+                        # Find a good reference row for formatting (use the last green row)
+                        reference_excel_row = insertion_excel_row
+                        
+                        print(f"   📍 Inserting {total_rows_to_add} rows after last green row (Excel row {insertion_excel_row})")
+                        
+                        # Use the new formatted row addition method
+                        added_count = self._add_formatted_green_rows(
+                            sheet, reference_excel_row, insertion_excel_row, total_rows_to_add, headers
+                        )
+                        rows_added += added_count
+                        
+                        print(f"   ✅ Added {added_count} formatted rows with preserved styling")
+                    else:
+                        # Fallback: add at end if no green rows found
+                        print("   ⚠️ No existing green rows found for reference, adding at end")
+                        last_used_row = sheet.used_range.last_cell.row
+                        added_count = self._add_empty_green_rows(sheet, last_used_row + 1, total_rows_to_add, headers)
+                        rows_added += added_count
+                    
+                    # Re-read the sheet data to include newly inserted rows
+                    print("   📊 Re-reading sheet data to include new formatted rows...")
+                    try:
+                        # Re-read the data from Excel to get the updated structure
+                        updated_headers, updated_data = self._batch_read_enhanced(sheet, header_row)
+                        
+                        # Reconstruct the DataFrame with the new data
+                        df = pd.DataFrame(updated_data, columns=updated_headers).astype(object).fillna('')
+                        print(f"   ✅ Updated DataFrame: {len(df)} rows (including new green rows)")
+                        
+                    except Exception as e:
+                        print(f"   ⚠️ Failed to re-read sheet, manually adding rows to DataFrame: {e}")
+                        # Fallback: manually add rows to the existing DataFrame
+                        for i in range(total_rows_to_add):
+                            new_row_data = [''] * len(headers)
+                            # Set the required green row identifiers
+                            if 'Item2' in headers:
+                                new_row_data[headers.index('Item2')] = 'Leasing period'
+                            if 'Note' in headers:
+                                new_row_data[headers.index('Note')] = 'Committed'
+                            df.loc[len(df)] = new_row_data
                     
                     # Recalculate empty green rows with the new rows
                     empty_green_mask = (
@@ -534,29 +840,110 @@ class EnhancedExcelProcessor:
             return ''
         return val
 
-    def _add_empty_green_rows(self, sheet: xw.Sheet, start_row: int, count: int, headers: List[str]) -> int:
-        """Add empty green rows to the sheet for auto-fill functionality"""
+    def _add_formatted_green_rows(self, sheet: xw.Sheet, reference_row: int, insert_after_row: int, count: int, headers: List[str]) -> int:
+        """
+        Add empty green rows with complete formatting preservation.
+        
+        Args:
+            sheet: Excel worksheet
+            reference_row: Row number to copy formatting from (existing green row)
+            insert_after_row: Row number after which to insert new rows
+            count: Number of rows to add
+            headers: Column headers list
+        
+        Returns:
+            Number of rows successfully added
+        """
         try:
+            if count <= 0:
+                return 0
+                
+            print(f"   🎨 Adding {count} formatted green rows after row {insert_after_row}")
+            print(f"   📋 Using row {reference_row} as formatting template")
+            
             rows_added = 0
+            
+            # Insert rows first to make space (this preserves relative positioning)
+            insertion_point = insert_after_row + 1
+            
+            # Insert multiple rows at once for better performance
+            try:
+                # Insert rows by selecting a range and using Excel's insert functionality
+                insert_range = sheet.range((insertion_point, 1), (insertion_point + count - 1, len(headers)))
+                insert_range.api.EntireRow.Insert()
+                print(f"   ✅ Inserted {count} blank rows at position {insertion_point}")
+            except Exception as e:
+                print(f"   ⚠️ Bulk row insertion failed, trying one-by-one: {e}")
+                # Fallback: insert rows one by one
+                for i in range(count):
+                    try:
+                        sheet.range((insertion_point, 1), (insertion_point, len(headers))).api.EntireRow.Insert()
+                    except Exception as row_error:
+                        print(f"   ❌ Failed to insert row {i+1}: {row_error}")
+                        break
+            
+            # Now copy formatting and data from the reference row
             for i in range(count):
-                row_num = start_row + i
+                target_row = insertion_point + i
                 
-                # Create empty row data with proper identifiers
-                row_data = [''] * len(headers)
-                
-                # Set the required green row identifiers
-                if 'Item2' in headers:
-                    row_data[headers.index('Item2')] = 'Leasing period'
-                if 'Note' in headers:
-                    row_data[headers.index('Note')] = 'Committed'
-                
-                # Write the row to Excel
-                sheet.range((row_num, 1), (row_num, len(headers))).value = row_data
-                rows_added += 1
-                
-            print(f"   ➕ Added {rows_added} empty green rows at row {start_row}")
+                try:
+                    # Copy entire row formatting from reference row
+                    source_range = sheet.range((reference_row, 1), (reference_row, len(headers)))
+                    target_range = sheet.range((target_row, 1), (target_row, len(headers)))
+                    
+                    # Copy formatting (background color, borders, fonts, number formats)
+                    source_range.api.Copy()
+                    target_range.api.PasteSpecial(-4122)  # xlPasteFormats
+                    
+                    # Copy formulas if any exist
+                    try:
+                        source_range.api.Copy()
+                        target_range.api.PasteSpecial(-4123)  # xlPasteFormulas
+                    except:
+                        pass  # No formulas to copy
+                    
+                    # Clear clipboard
+                    try:
+                        sheet.app.api.CutCopyMode = False
+                    except:
+                        pass
+                    
+                    # Set the data values for green row identification
+                    row_data = [''] * len(headers)
+                    
+                    # Set required identifiers
+                    if 'Item2' in headers:
+                        row_data[headers.index('Item2')] = 'Leasing period'
+                    if 'Note' in headers:
+                        row_data[headers.index('Note')] = 'Committed'
+                    
+                    # Write only the data, preserving all formatting
+                    target_range.value = row_data
+                    rows_added += 1
+                    
+                except Exception as e:
+                    print(f"   ⚠️ Failed to format row {target_row}: {e}")
+                    # Still try to add basic data even if formatting fails
+                    try:
+                        row_data = [''] * len(headers)
+                        if 'Item2' in headers:
+                            row_data[headers.index('Item2')] = 'Leasing period'
+                        if 'Note' in headers:
+                            row_data[headers.index('Note')] = 'Committed'
+                        sheet.range((target_row, 1), (target_row, len(headers))).value = row_data
+                        rows_added += 1
+                    except Exception as data_error:
+                        print(f"   ❌ Failed to add data to row {target_row}: {data_error}")
+                        break
+            
+            print(f"   ✅ Successfully added {rows_added} formatted green rows")
             return rows_added
             
         except Exception as e:
-            print(f"   ❌ Failed to add empty green rows: {e}")
+            print(f"   ❌ Failed to add formatted green rows: {e}")
             return 0
+
+    def _add_empty_green_rows(self, sheet: xw.Sheet, start_row: int, count: int, headers: List[str]) -> int:
+        """Legacy method - kept for backward compatibility"""
+        print(f"   ⚠️ Using legacy row addition method - formatting may not be preserved")
+        return self._add_formatted_green_rows(sheet, start_row - 1, start_row - 1, count, headers)
