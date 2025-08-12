@@ -25,6 +25,7 @@ class EnhancedExcelProcessor:
 
         # Logging optimization
         self.verbose_logging = getattr(config, 'verbose_logging', False)
+        self._date_parse_cache = {}  # Cache for date parsing to avoid redundant parsing
 
         # Feature flags for optimization toggles
         self.feature_flags = {
