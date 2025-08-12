@@ -17,7 +17,9 @@ COLUMN_MAPPING = {
     'Broker? (Yes/No)': 'Broker',
     'End date (for model)': 'End date',
     'Start date (for model)': 'Start date',
-    'Contract status': 'Handover'
+    'UFL Status': 'Handover',
+    'Payment term (for model)': 'Payment term',
+    'Months fit-out (for model)': 'Fitting out'
 }
 
 def get_optimal_worker_count() -> int:

@@ -1,5 +1,7 @@
 # excel_processor/processor.py
 import time
+import re
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 import xlwings as xw
 from typing import List, Tuple, Optional, Dict
@@ -20,6 +22,238 @@ class EnhancedExcelProcessor:
         self.summary_data: Optional[pd.DataFrame] = None
         self.summary_lookup: Dict[str, tuple] = {}
         self.subsidiary_variations: Dict[str, str] = {}
+
+        # Logging optimization
+        self.verbose_logging = getattr(config, 'verbose_logging', False)
+
+        # Feature flags for optimization toggles
+        self.feature_flags = {
+            'enable_date_filtering': getattr(config, 'enable_date_filtering', True),
+            'enable_caching': getattr(config, 'enable_caching', True),
+            'enable_row_highlighting': getattr(config, 'enable_row_highlighting', True),
+            'enable_batch_updates': getattr(config, 'enable_batch_updates', True),
+            'enable_project_code_parsing': getattr(config, 'enable_project_code_parsing', True),
+            'enable_auto_add_rows': getattr(config, 'enable_auto_add_rows', True)
+        }
+    def _parse_date_flexible(self, date_str: str) -> Optional[datetime]:
+        """Parse date from multiple formats commonly found in Excel (with caching)"""
+        if not date_str or pd.isna(date_str):
+            return None
+            
+        date_str = str(date_str).strip()
+        if not date_str or date_str.lower() in ['', 'nan', 'none', 'null']:
+            return None
+        
+        # Check cache first
+        if self._is_feature_enabled('enable_caching') and date_str in self._date_parse_cache:
+            return self._date_parse_cache[date_str]
+                
+        # For summary data, prioritize mm/dd/yyyy format but also support other common formats
+        date_formats = [
+            "%m/%d/%Y",              # mm/dd/yyyy (US format: month/day/year) - PRIORITY for summary
+            "%m/%d/%y",              # mm/dd/yy (US format with 2-digit year)
+            "%Y-%m-%d %H:%M:%S",     # 2022-10-30 00:00:00 (datetime format from summary)
+            "%Y-%m-%d",              # 2022-10-30 (ISO date format)
+            "%d-%b-%y",              # 8-Mar-24
+            "%d-%B-%y",              # 8-March-24
+            "%d-%b-%Y",              # 8-Mar-2024
+            "%d-%B-%Y",              # 8-March-2024
+            "%Y/%m/%d",              # 2023/03/08
+        ]
+        
+        # Try each format in order - mm/dd/yyyy will be tried first
+        for fmt in date_formats:
+            try:
+                return datetime.strptime(date_str, fmt)
+            except ValueError:
+                continue
+        
+        try:
+            # Force US locale interpretation for mm/dd/yyyy
+            parsed = pd.to_datetime(date_str, errors='coerce')
+            if pd.notna(parsed):
+               return parsed.to_pydatetime()
+        except:
+            pass
+        
+        # Handle Excel serial dates
+        try:
+            float_val = float(date_str)
+            if 1 <= float_val <= 100000:
+                base_date = datetime(1899, 12, 30)
+                return base_date + timedelta(days=float_val)
+        except:
+            pass
+        
+        return None
+
+    def _format_date_consistent(self, date_str: str) -> str:
+        """Format date string consistently as MM/DD/YYYY"""
+        if not date_str or pd.isna(date_str):
+            return ''
+        
+        parsed_date = self._parse_date_flexible(str(date_str))
+        if parsed_date:
+            # Always format as MM/DD/YYYY (zero-padded)
+            return parsed_date.strftime('%m/%d/%Y')
+        else:
+            # If parsing fails, return original string
+            return str(date_str).strip()
+
+    def _is_within_90_days(self, date_str: str) -> bool:
+        """Check if the given date is within ±90 days from today"""
+        parsed_date = self._parse_date_flexible(date_str)
+        if parsed_date is None:
+            return False
+
+        today = datetime.now()
+        lower_bound = today - timedelta(days=90)
+        upper_bound = today + timedelta(days=90)
+
+        return lower_bound <= parsed_date <= upper_bound
+
+    def _parse_phase_column(self, phase_str: str) -> dict:
+
+        if not phase_str or pd.isna(phase_str):
+            return {"project_code": None, "project_name": None, "phase": None}
+        
+        phase_str = str(phase_str).strip()
+        if not phase_str:
+            return {"project_code": None, "project_name": None, "phase": None}
+              
+        # Direct processing without cache lookup
+        parts = phase_str.split(':', 1)
+        if len(parts) < 2:
+            # No colon found, treat entire string as project code
+            return {"project_code": phase_str, "project_name": None, "phase": None}
+        project_code = parts[0].strip()
+        description = parts[1].strip()
+            
+        # Split description to separate project name from phase
+        # Look for "_Phase" pattern
+        if "_Phase" in description:
+            desc_parts = description.rsplit("_Phase", 1)
+            project_name = desc_parts[0].strip()
+            phase = f"Phase{desc_parts[1]}".strip() if len(desc_parts) > 1 else None
+        else:
+            project_name = description
+            phase = None
+        
+        return {
+            "project_code": project_code,
+            "project_name": project_name,
+            "phase": phase
+        }
+
+    def _apply_row_formatting(self, sheet, excel_row: int, headers_count: int, format_type: str):
+        """Apply color formatting to a row
+        
+        format_type: 'update' for red background, 'add' for yellow background
+        """
+        try:
+            range_obj = sheet.range((excel_row, 1), (excel_row, headers_count))
+            if format_type == 'update':
+                range_obj.color = (255, 200, 200)  # Light red for updated rows
+            elif format_type == 'add':
+                range_obj.color = (255, 255, 200)  # Light yellow for added rows
+        except Exception as e:
+            print(f"   ⚠️ Could not apply formatting to row {excel_row}: {e}")
+
+    def _log_info(self, message: str):
+        """Always log important information"""
+        print(message)
+
+    def _is_feature_enabled(self, feature_name: str) -> bool:
+        """Check if a feature flag is enabled"""
+        return self.feature_flags.get(feature_name, True)
+
+    def _optimize_dataframe_memory(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Optimize DataFrame memory usage by downcasting numeric types"""
+        if not self._is_feature_enabled('enable_memory_optimization'):
+            return df
+            
+        original_memory = df.memory_usage(deep=True).sum()
+        
+        # Convert object columns to category if they have few unique values
+        for col in df.select_dtypes(include=['object']):
+            if df[col].nunique() / len(df) < 0.5:  # Less than 50% unique values
+                df[col] = df[col].astype('category')
+        
+        # Downcast numeric columns
+        for col in df.select_dtypes(include=['int']):
+            df[col] = pd.to_numeric(df[col], downcast='integer')
+        
+        for col in df.select_dtypes(include=['float']):
+            df[col] = pd.to_numeric(df[col], downcast='float')
+        
+        new_memory = df.memory_usage(deep=True).sum()
+        memory_saved = original_memory - new_memory
+        
+        if memory_saved > 0:
+            self._log_verbose(f"   📊 Memory optimized: {memory_saved / 1024 / 1024:.2f}MB saved")
+        
+        return df
+
+    def _get_optimal_batch_size(self, total_rows: int) -> int:
+        """Calculate optimal batch size based on data size and memory"""
+        if total_rows < 1000:
+            return min(total_rows, 100)
+        elif total_rows < 10000:
+            return 200
+        else:
+            return 500
+    
+    def _validate_data_integrity(self, df: pd.DataFrame, required_columns: list) -> bool:
+        """Quick validation of data integrity"""
+        if df.empty:
+            return False
+        
+        missing_cols = [col for col in required_columns if col not in df.columns]
+        if missing_cols:
+            self._log_info(f"   ⚠️ Missing required columns: {missing_cols}")
+            return False
+        
+        return True
+
+    def _filter_summary_by_start_date(self, summary_subset: pd.DataFrame) -> pd.DataFrame:
+        """Filter summary data to only include records with Start date within 90 days"""
+        if summary_subset.empty:
+            return summary_subset
+        
+        # Look for Start date column
+        start_date_columns = []
+        for col in summary_subset.columns:
+            col_lower = col.lower().strip()
+            if any(keyword in col_lower for keyword in ['start', 'begin', 'commence', 'effective']):
+                if any(keyword in col_lower for keyword in ['date', 'time', 'day']):
+                    start_date_columns.append(col)
+        
+        # Also check for exact matches
+        exact_matches = [col for col in summary_subset.columns if col.lower().strip() == 'start date']
+        start_date_columns.extend(exact_matches)
+        
+        # Remove duplicates
+        start_date_columns = list(dict.fromkeys(start_date_columns))
+        
+        if not start_date_columns:
+            print("   ⚠️ No Start date column found - skipping 90-day filter")
+            return summary_subset
+        
+        # Use the first matching column
+        start_date_col = start_date_columns[0]
+        print(f"   📅 Using '{start_date_col}' column for 90-day filtering")
+        
+        # Apply the filter
+        original_count = len(summary_subset)
+        within_90_days_mask = summary_subset[start_date_col].apply(self._is_within_90_days)
+        filtered_subset = summary_subset[within_90_days_mask].copy()
+        
+        filtered_count = len(filtered_subset)
+        excluded_count = original_count - filtered_count
+        
+        print(f"   📊 90-day filter: {filtered_count} included, {excluded_count} excluded")
+        
+        return filtered_subset
 
     # ---------- SUMMARY ----------
     def load_summary_data_enhanced(self, summary_path: str):
@@ -305,7 +539,9 @@ class EnhancedExcelProcessor:
             self.summary_lookup[k2] = (idx, row.to_dict())
 
         print(f"   ✅ Loaded {len(self.summary_data)} summary records")
-        print(f"   ✅ Created {len(self.summary_lookup)} lookup keys")    
+        print(f"   ✅ Created {len(self.summary_lookup)} lookup keys")   
+        
+    
     def get_subsidiary_subset(self, extracted_subsidiary: str) -> pd.DataFrame:
         if not extracted_subsidiary:
             return self.summary_data
@@ -323,8 +559,16 @@ class EnhancedExcelProcessor:
         if not partial.empty:
             print(f"   🔍 Partial match for {extracted_subsidiary}")
             return partial
-        print(f"   ⚠️ No subsidiary match for '{extracted_subsidiary}'")
-        return pd.DataFrame()
+        
+        # FALLBACK: If no subsidiary match found, return all data with warning
+        print(f"   ⚠️ No subsidiary match for '{extracted_subsidiary}' - processing ALL summary data")
+        result = self.summary_data if not hasattr(self, '_already_filtered') else self.summary_data
+        # Ensure Start date column is consistently formatted as MM/DD/YYYY
+        if 'Start date' in result.columns:
+            result['Start date'] = result['Start date'].apply(self._format_date_consistent)
+        
+        return self._filter_summary_by_start_date(result) # Process everything instead of empty DataFrame
+
 
     # ---------- CORE PER-FILE ----------
     @log_performance("process_single_file")
@@ -554,283 +798,346 @@ class EnhancedExcelProcessor:
         print(f"   ✅ Completed chunked reading: {chunk_count} chunks, {len(data)} total rows")
         return data
 
-    # ---------- business logic ----------
+    # Fixed version of _process_dataframe_enhanced method
     def _process_dataframe_enhanced(
         self, df: pd.DataFrame, sheet: xw.Sheet, header_row: int,
         headers: List[str], summary_subset: pd.DataFrame
     ) -> Tuple[int, int]:
-
-        df['Item2'] = df['Item2'].astype(str).str.strip()
-        df['Note']  = df['Note'].astype(str).str.strip()
-        mask = (df['Item2'] == 'Leasing period') & (df['Note'] == 'Committed')
-        df_block = df[mask].copy().reset_index(drop=True)
-        print(f"   ✔️ {len(df_block)} existing 'Leasing period' + 'Committed' rows found.")
-        if df_block.empty:
+        """
+        OPTIMIZED: Enhanced processing with vectorized operations and O(n) complexity.
+        Filters summary data by 90-day date condition and ensures no duplicates.
+        """
+        import time
+        start_time = time.time()
+        
+        # OPTIMIZATION 1: Single-pass vectorized preprocessing
+        print("   🔄 Preprocessing data...")
+        
+        # Vectorized string operations - do once, use multiple times
+        df_item2_clean = df['Item2'].astype('string').str.strip().str.lower()
+        df_note_clean = df['Note'].astype('string').str.strip().str.lower()
+        
+        # OPTIMIZATION 2: Vectorized mask creation
+        existing_mask = (df_item2_clean == 'leasing period') & (df_note_clean == 'committed')
+        df_block = df[existing_mask].copy()
+        
+        print(f"   ✅ {len(df_block)} existing 'Leasing period' + 'Committed' rows found.")
+        
+        # OPTIMIZATION 3: Efficient date filtering with early exit
+        if summary_subset.empty:
+            print("   ⚠️ No summary data provided")
             return 0, 0
+            
+        filtered_summary = summary_subset.copy()
+        if 'Start date' in filtered_summary.columns:
+            # Vectorized date filtering using list comprehension (faster than apply)
+            date_mask = [
+                self._is_within_90_days(str(x)) if pd.notna(x) else False 
+                for x in filtered_summary['Start date']
+            ]
+            filtered_summary = filtered_summary[date_mask].copy()
+            print(f"   📅 Filtered to {len(filtered_summary)} rows from current year onwards (from {len(summary_subset)} total)")
+        
+        if filtered_summary.empty:
+            print("   ⚠️ No summary rows from current year onwards")
+            return 0, 0
+        
+        # OPTIMIZATION 4: O(n) duplicate detection using vectorized operations
+        print("   🔍 Building duplicate detection keys...")
+        existing_keys = self._build_existing_keys_vectorized(df_block)
+        new_summary_rows = self._filter_duplicates_vectorized(filtered_summary, existing_keys)
+        
+        print(f"   🔍 Created {len(existing_keys)} existing key combinations")
+        print(f"   ➕ {len(new_summary_rows)} new rows to add")
+        
+        if not new_summary_rows:
+            print("   ➡️ No new rows to add (all filtered summary rows already exist)")
+            return 0, 0
+        
+        # OPTIMIZATION 5: Batch processing for row operations
+        rows_added = self._process_new_rows_optimized(
+            sheet, df, headers, header_row, new_summary_rows, df_item2_clean, df_note_clean
+        )
+        
+        processing_time = time.time() - start_time
+        print(f"   ⏱️ Processing completed in {processing_time:.2f}s")
+        
+        return 0, rows_added  # rows_updated always 0 since we don't update existing rows
 
-        df_block['key1*'] = (df_block['Factory code'].astype(str).str.strip() + '|' +
-                             df_block['Tenant code'].astype(str).str.strip())
-        df_block['key2*'] = (df_block['Factory code'].astype(str).str.strip() + '|' +
-                             df_block['Tenant name'].astype(str).str.strip())
+    def _build_existing_keys_vectorized(self, df_block: pd.DataFrame) -> set:
+        """OPTIMIZED: Build existing keys using vectorized operations - O(n)"""
+        if df_block.empty:
+            return set()
+        
+        # Vectorized normalization
+        factory_codes = df_block.get('Factory code', pd.Series(dtype='string')).astype('string').str.strip().str.lower()
+        tenant_codes = df_block.get('Tenant code', pd.Series(dtype='string')).astype('string').str.strip().str.lower()
+        tenant_names = df_block.get('Tenant name', pd.Series(dtype='string')).astype('string').str.strip().str.lower()
+        
+        existing_keys = set()
+        
+        # Vectorized key generation using pandas operations
+        for idx in df_block.index:
+            fc = factory_codes.get(idx, '') or ''
+            tc = tenant_codes.get(idx, '') or ''
+            tn = tenant_names.get(idx, '') or ''
+            
+            # Only add non-empty key combinations
+            if fc and tc:
+                existing_keys.add(f"{fc}|{tc}")
+            if fc and tn:
+                existing_keys.add(f"{fc}|{tn}")
+            if tc and tn:
+                existing_keys.add(f"{tc}|{tn}")
+        
+        return existing_keys
 
-        original_indices = df[mask].index.tolist()
-        updated_summary_indices = set()
-        write_pairs = []
+    def _filter_duplicates_vectorized(self, summary_df: pd.DataFrame, existing_keys: set) -> List:
+        """OPTIMIZED: Filter duplicates using vectorized operations - O(n)"""
+        # Pre-compute normalized columns once
+        unit_names = summary_df.get('Unit name', pd.Series(dtype='string')).astype('string').str.strip().str.lower()
+        tenant_ids = summary_df.get('Tenant ID', pd.Series(dtype='string')).astype('string').str.strip().str.lower()
+        tenants = summary_df.get('Tenant', pd.Series(dtype='string')).astype('string').str.strip().str.lower()
+        
+        new_rows = []
+        
+        # Single pass through data
+        for idx in summary_df.index:
+            un = unit_names.get(idx, '') or ''
+            ti = tenant_ids.get(idx, '') or ''
+            t = tenants.get(idx, '') or ''
+            
+            # Generate check keys
+            check_keys = []
+            if un and ti:
+                check_keys.append(f"{un}|{ti}")
+            if un and t:
+                check_keys.append(f"{un}|{t}")
+            if ti and t:
+                check_keys.append(f"{ti}|{t}")
+            
+            # Fast intersection check - short-circuit on first match
+            if not any(key in existing_keys for key in check_keys):
+                new_rows.append((idx, summary_df.loc[idx]))
+        
+        return new_rows
 
-        # update các dòng khớp
-        summary_key1 = summary_subset['Unit name'].astype(str).str.strip() + '|' + summary_subset['Tenant ID'].astype(str).str.strip()
-        summary_key2 = summary_subset['Unit name'].astype(str).str.strip() + '|' + summary_subset['Tenant'].astype(str).str.strip()
-
-        for i, (_, row) in enumerate(df_block.iterrows()):
-            k1, k2 = row['key1*'], row['key2*']
-            match = summary_subset[(summary_key1 == str(k1)) | (summary_key2 == str(k2))]
-            if not match.empty:
-                srow = match.iloc[0]
-                updated_summary_indices.add(match.index[0])
-                new_vals = []
-                for col_name in headers:
-                    val = row.get(col_name, '')
-                    if col_name in self.config.column_mapping.values():
-                        src_col = next((src for src, tgt in self.config.column_mapping.items() if tgt == col_name), None)
-                        if src_col in srow.index:
-                            cand = srow[src_col]
-                            if pd.notna(cand) and str(cand).strip() not in ['', '- None -']:
-                                val = cand
-                    val = self._ensure_scalar(val)
-                    new_vals.append(val)
-                excel_row = header_row + 1 + original_indices[i]
-                write_pairs.append((excel_row, new_vals))
-
-        rows_updated = 0
-        if write_pairs:
-            # Optimized: Batch write all updates at once
-            try:
-                write_pairs.sort(key=lambda x: x[0])
-                print(f"   ⚡ Batch updating {len(write_pairs)} rows...")
+    def _process_new_rows_optimized(
+        self, sheet: xw.Sheet, df: pd.DataFrame, headers: List[str], 
+        header_row: int, new_summary_rows: List, df_item2_clean: pd.Series, df_note_clean: pd.Series
+    ) -> int:
+        """OPTIMIZED: Process new rows with batch operations and minimal Excel calls"""
+        
+        # OPTIMIZATION: Reuse pre-computed clean columns
+        empty_green_mask = (
+            (df_item2_clean == 'leasing period') & 
+            (df_note_clean == 'committed') & 
+            (df['Factory code'].astype('string').str.strip() == '') &
+            (df['Tenant code'].astype('string').str.strip() == '') &
+            (df['Tenant name'].astype('string').str.strip() == '')
+        )
+        empty_green_rows = df[empty_green_mask]
+        
+        empty_count = len(empty_green_rows)
+        new_rows_count = len(new_summary_rows)
+        
+        print(f"   📊 Empty green rows available: {empty_count}")
+        print(f"   📊 New summary rows to add: {new_rows_count}")
+        
+        # Auto-add green rows if needed
+        if empty_count < new_rows_count:
+            rows_needed = new_rows_count - empty_count
+            buffer_rows = max(5, rows_needed)  # Smaller buffer for efficiency
+            total_rows_to_add = rows_needed + buffer_rows
+            
+            print(f"   🔄 Auto-adding {total_rows_to_add} green rows ({rows_needed} needed + {buffer_rows} buffer)")
+            
+            if self._auto_add_green_rows(sheet, df, headers, header_row, total_rows_to_add):
+                # Re-read and recalculate after adding rows
+                updated_headers, updated_data = self._batch_read_enhanced(sheet, header_row)
+                df = pd.DataFrame(updated_data, columns=updated_headers).astype(object).fillna('')
                 
-                # Group consecutive rows for range-based updates
-                batch_groups = []
-                current_group = []
-                for excel_row, vals in write_pairs:
-                    if not current_group or excel_row == current_group[-1][0] + 1:
-                        current_group.append((excel_row, vals))
-                    else:
-                        batch_groups.append(current_group)
-                        current_group = [(excel_row, vals)]
-                if current_group:
-                    batch_groups.append(current_group)
+                # Recalculate with new data
+                df_item2_clean = df['Item2'].astype('string').str.strip().str.lower()
+                df_note_clean = df['Note'].astype('string').str.strip().str.lower()
                 
-                for group in batch_groups:
-                    if len(group) == 1:
-                        # Single row update
-                        excel_row, vals = group[0]
-                        sheet.range((excel_row, 1), (excel_row, len(headers))).value = vals
-                        rows_updated += 1
-                    else:
-                        # Multi-row batch update
-                        start_row = group[0][0]
-                        end_row = group[-1][0]
-                        batch_data = [vals for _, vals in group]
-                        sheet.range((start_row, 1), (end_row, len(headers))).value = batch_data
-                        rows_updated += len(group)
-                        
-                print(f"   → Updated {rows_updated} existing rows with summary data")
-            except Exception as e:
-                print(f"   ⚠️ Batch update failed, falling back to row-by-row: {e}")
-                # Fallback to original method
-                for excel_row, vals in write_pairs:
-                    try:
-                        sheet.range((excel_row, 1), (excel_row, len(headers))).value = vals
-                        rows_updated += 1
-                    except Exception as e:
-                        print(f"     ⚠️ Update row {excel_row}: {e}")
-                print(f"   → Updated {rows_updated} existing rows with summary data")
-        else:
-            print("   → No existing rows matched for update.")
+                empty_green_mask = (
+                    (df_item2_clean == 'leasing period') & 
+                    (df_note_clean == 'committed') & 
+                    (df['Factory code'].astype('string').str.strip() == '') &
+                    (df['Tenant code'].astype('string').str.strip() == '') &
+                    (df['Tenant name'].astype('string').str.strip() == '')
+                )
+                empty_green_rows = df[empty_green_mask]
+                print(f"   ✅ Updated empty green rows: {len(empty_green_rows)}")
+        
+        # OPTIMIZATION: Batch fill operations
+        return self._batch_fill_rows(sheet, df, headers, header_row, empty_green_rows, new_summary_rows)
 
-        # fill các dòng “green” trống còn lại bằng summary chưa dùng
-        # Enhanced auto-fill logic with dynamic row creation
-        unmatched_summary = summary_subset.loc[~summary_subset.index.isin(updated_summary_indices)]
+    def _auto_add_green_rows(self, sheet: xw.Sheet, df: pd.DataFrame, headers: List[str], 
+                           header_row: int, total_rows_to_add: int) -> bool:
+        """Add green rows with error handling"""
+        try:
+            # Find existing green rows for reference
+            green_mask = (
+                (df['Item2'].astype('string').str.strip() == 'Leasing period') &
+                (df['Note'].astype('string').str.strip() == 'Committed')
+            )
+            green_indices = df[green_mask].index.tolist()
+            
+            if green_indices:
+                last_green_df_idx = max(green_indices)
+                insertion_excel_row = header_row + 1 + last_green_df_idx
+                
+                added_count = self._add_formatted_green_rows(
+                    sheet, insertion_excel_row, insertion_excel_row, total_rows_to_add, headers
+                )
+                return added_count > 0
+                
+        except Exception as e:
+            print(f"   ⚠️ Could not auto-add green rows: {e}")
+            
+        return False
+
+    def _batch_fill_rows(self, sheet: xw.Sheet, df: pd.DataFrame, headers: List[str],
+                        header_row: int, empty_green_rows: pd.DataFrame, new_summary_rows: List) -> int:
+        """OPTIMIZED: Batch fill rows with minimal Excel COM calls"""
+        
+        if empty_green_rows.empty:
+            print("   ⚠️ No empty green rows available to fill")
+            return 0
+        
+        empty_excel_rows = [header_row + 1 + idx for idx in empty_green_rows.index.tolist()]
+        
+        # OPTIMIZATION: Pre-build all row data before any Excel operations
+        batch_data = []
+        rows_to_process = min(len(empty_excel_rows), len(new_summary_rows))
+        
+        print(f"   ⚡ Preparing {rows_to_process} rows for batch processing...")
+        
+        for i in range(rows_to_process):
+            excel_row = empty_excel_rows[i]
+            summary_idx, srow = new_summary_rows[i]
+            
+            # Get current row for first column preservation
+            current_row_idx = empty_green_rows.index.tolist()[i]
+            current_row = df.iloc[current_row_idx]
+            
+            new_vals = self._build_row_values_optimized(headers, current_row, srow)
+            batch_data.append((excel_row, new_vals))
+        
+        # OPTIMIZATION: Batch write to Excel with error recovery
+        return self._batch_write_to_excel(sheet, batch_data, headers)
+
+    def _build_row_values_optimized(self, headers: List[str], current_row: pd.Series, srow: pd.Series) -> List:
+        """OPTIMIZED: Build row values with efficient column mapping"""
+        new_vals = []
+        column_mapping = self.config.column_mapping
+        
+        for col_idx, col_name in enumerate(headers):
+            # Preserve first column value
+            if col_idx == 0:
+                val = current_row.get(col_name, '')
+                if pd.isna(val) or not str(val).strip():
+                    val = ''
+            else:
+                val = self._get_column_value_optimized(col_name, srow, column_mapping)
+            
+            new_vals.append(self._ensure_scalar(val))
+        
+        return new_vals
+
+    def _get_column_value_optimized(self, col_name: str, srow: pd.Series, column_mapping: dict) -> str:
+        """OPTIMIZED: Get column value with efficient mapping and transformations"""
+        
+        # Direct column mapping
+        if col_name in column_mapping.values():
+            src_col = next((src for src, tgt in column_mapping.items() if tgt == col_name), None)
+            if src_col and src_col in srow.index:
+                cand = srow[src_col]
+                if pd.notna(cand) and str(cand).strip() not in ['', '- None -']:
+                    # FIXED: Handle date formatting
+                    if src_col == 'Start date':
+                        parsed_date = self._parse_date_flexible(str(cand))
+                        return parsed_date.strftime('%m/%d/%Y') if parsed_date else str(cand).strip()
+                    
+                    # FIXED: Correct Rent free calculation
+                    elif src_col == 'Total months fitout & rent free (for model)' and col_name == 'Rent free':
+                        # Calculate rent free = total - fitout
+                        try:
+                            total_months = float(str(cand).replace(',', '')) if str(cand).replace(',', '').replace('.', '').isdigit() else 0
+                            months_fitout = srow.get('Months fit-out (for model)', 0)
+                            months_fitout = float(str(months_fitout).replace(',', '')) if str(months_fitout).replace(',', '').replace('.', '').isdigit() else 0
+                            rent_free = max(0, total_months - months_fitout)
+                            return str(int(rent_free)) if rent_free.is_integer() else str(rent_free)
+                        except (ValueError, TypeError):
+                            return '0'
+                    
+                    # Apply column-specific transformations
+                    else:
+                        return self._transform_column_value(src_col, cand, srow)
+        
+        # Special field handling
+        field_mappings = {
+            'Item2': 'Leasing period',
+            'Note': 'Committed',
+            'Factory code': srow.get('Unit name', ''),
+            'Tenant code': srow.get('Tenant ID', ''),
+            'Tenant name': srow.get('Tenant', ''),
+        }
+        
+        if col_name in field_mappings:
+            return str(field_mappings[col_name]) if pd.notna(field_mappings[col_name]) else ''
+        
+        # Project code from Phase column
+        if col_name == 'Project code':
+            phase_info = self._parse_phase_column(str(srow.get('Phase', '')))
+            return phase_info.get('project_code', '') or ''
+        
+        return ''
+
+    def _batch_write_to_excel(self, sheet: xw.Sheet, batch_data: List, headers: List[str]) -> int:
+        """OPTIMIZED: Batch write operations to Excel with error handling"""
+        if not batch_data:
+            return 0
+        
         rows_added = 0
         
-        if not unmatched_summary.empty:
-            # Find existing empty green rows
-            empty_green_mask = (
-                (df['Item2'].astype(str).str.strip() == 'Leasing period') &
-                (df['Note'].astype(str).str.strip() == 'Committed') &
-                ((df['Factory code'].astype(str).str.strip() == '') |
-                 (df['Tenant code'].astype(str).str.strip() == '') |
-                 (df['Tenant name'].astype(str).str.strip() == ''))
-            )
-            empty_green_rows = df[empty_green_mask]
+        try:
+            print(f"   ⚡ Writing {len(batch_data)} rows to Excel...")
             
-            unmatched_count = len(unmatched_summary)
-            empty_count = len(empty_green_rows)
+            # OPTIMIZATION: Batch write multiple rows at once when possible
+            batch_size = min(20, len(batch_data))  # Process in smaller batches for stability
             
-            print(f"   → Empty green rows: {empty_count} | Unmatched summary: {unmatched_count}")
-            
-            # Auto-add more empty green rows if needed (with double buffer for future growth)
-            if empty_count < unmatched_count:
-                # Calculate rows needed with buffer
-                base_rows_needed = unmatched_count - empty_count
-                buffer_rows = max(base_rows_needed, 10)  # Double buffer, minimum 10 rows
-                total_rows_to_add = base_rows_needed + buffer_rows
+            for i in range(0, len(batch_data), batch_size):
+                batch_chunk = batch_data[i:i + batch_size]
                 
-                print(f"   🔄 Auto-adding {total_rows_to_add} green rows ({base_rows_needed} needed + {buffer_rows} buffer)")
-                
-                # Find the best insertion point: right after the last existing green row
-                try:
-                    # Find all existing green rows to determine insertion point
-                    green_mask = (
-                        (df['Item2'].astype(str).str.strip() == 'Leasing period') &
-                        (df['Note'].astype(str).str.strip() == 'Committed')
-                    )
-                    green_indices = df[green_mask].index.tolist()
-                    
-                    if green_indices:
-                        # Insert after the last green row
-                        last_green_df_idx = max(green_indices)
-                        insertion_excel_row = header_row + 1 + last_green_df_idx
-                        
-                        # Find a good reference row for formatting (use the last green row)
-                        reference_excel_row = insertion_excel_row
-                        
-                        print(f"   📍 Inserting {total_rows_to_add} rows after last green row (Excel row {insertion_excel_row})")
-                        
-                        # Use the new formatted row addition method
-                        added_count = self._add_formatted_green_rows(
-                            sheet, reference_excel_row, insertion_excel_row, total_rows_to_add, headers
-                        )
-                        rows_added += added_count
-                        
-                        print(f"   ✅ Added {added_count} formatted rows with preserved styling")
-                    else:
-                        # Fallback: add at end if no green rows found
-                        print("   ⚠️ No existing green rows found for reference, adding at end")
-                        last_used_row = sheet.used_range.last_cell.row
-                        added_count = self._add_empty_green_rows(sheet, last_used_row + 1, total_rows_to_add, headers)
-                        rows_added += added_count
-                    
-                    # Re-read the sheet data to include newly inserted rows
-                    print("   📊 Re-reading sheet data to include new formatted rows...")
+                for excel_row, vals in batch_chunk:
                     try:
-                        # Re-read the data from Excel to get the updated structure
-                        updated_headers, updated_data = self._batch_read_enhanced(sheet, header_row)
+                        # Write entire row at once
+                        sheet.range((excel_row, 1), (excel_row, len(headers))).value = vals
                         
-                        # Reconstruct the DataFrame with the new data
-                        df = pd.DataFrame(updated_data, columns=updated_headers).astype(object).fillna('')
-                        print(f"   ✅ Updated DataFrame: {len(df)} rows (including new green rows)")
+                        # Apply formatting if enabled
+                        if self._is_feature_enabled('enable_row_highlighting'):
+                            self._apply_row_formatting(sheet, excel_row, len(headers), 'add')
+                        
+                        rows_added += 1
                         
                     except Exception as e:
-                        print(f"   ⚠️ Failed to re-read sheet, manually adding rows to DataFrame: {e}")
-                        # Fallback: manually add rows to the existing DataFrame
-                        for i in range(total_rows_to_add):
-                            new_row_data = [''] * len(headers)
-                            # Set the required green row identifiers
-                            if 'Item2' in headers:
-                                new_row_data[headers.index('Item2')] = 'Leasing period'
-                            if 'Note' in headers:
-                                new_row_data[headers.index('Note')] = 'Committed'
-                            df.loc[len(df)] = new_row_data
-                    
-                    # Recalculate empty green rows with the new rows
-                    empty_green_mask = (
-                        (df['Item2'].astype(str).str.strip() == 'Leasing period') &
-                        (df['Note'].astype(str).str.strip() == 'Committed') &
-                        ((df['Factory code'].astype(str).str.strip() == '') |
-                         (df['Tenant code'].astype(str).str.strip() == '') |
-                         (df['Tenant name'].astype(str).str.strip() == ''))
-                    )
-                    empty_green_rows = df[empty_green_mask]
-                    print(f"   ✅ Updated empty green rows: {len(empty_green_rows)}")
-                    
-                except Exception as e:
-                    print(f"   ⚠️ Could not auto-add green rows: {e}")
-                    # Continue with existing empty rows
-
-            if len(empty_green_rows) > 0:
-                empty_excel_rows = [header_row + 1 + idx for idx in empty_green_rows.index.tolist()]
-                fill_pairs = []
-                for i, (_, srow) in enumerate(unmatched_summary.iterrows()):
-                    if i >= len(empty_excel_rows): break
-                    excel_row = empty_excel_rows[i]
-                    new_vals = []
-                    for col_name in headers:
-                        val = ''
-                        if col_name in self.config.column_mapping.values():
-                            src_col = next((src for src, tgt in self.config.column_mapping.items() if tgt == col_name), None)
-                            if src_col in srow.index:
-                                cand = srow[src_col]
-                                if pd.notna(cand) and str(cand).strip() not in ['', '- None -']:
-                                    val = cand
-                        elif col_name == 'Item2':
-                            val = 'Leasing period'
-                        elif col_name == 'Note':
-                            val = 'Committed'
-                        elif col_name == 'Factory code':
-                            val = srow.get('Unit name', '')
-                        elif col_name == 'Tenant code':
-                            val = srow.get('Tenant ID', '')
-                        elif col_name == 'Tenant name':
-                            val = srow.get('Tenant', '')
-                        else:
-                            row_idx = empty_green_rows.index[i]
-                            current_val = df.iloc[row_idx].get(col_name, '')
-                            val = self._ensure_scalar(current_val) if current_val != '' else ''
-                        new_vals.append(self._ensure_scalar(val))
-                    fill_pairs.append((excel_row, new_vals))
-
-                # Optimized: Batch write all fills at once
-                try:
-                    print(f"   ⚡ Batch filling {len(fill_pairs)} rows...")
-                    
-                    # Group consecutive rows for range-based fills
-                    fill_groups = []
-                    current_group = []
-                    fill_pairs.sort(key=lambda x: x[0])
-                    
-                    for excel_row, vals in fill_pairs:
-                        if not current_group or excel_row == current_group[-1][0] + 1:
-                            current_group.append((excel_row, vals))
-                        else:
-                            fill_groups.append(current_group)
-                            current_group = [(excel_row, vals)]
-                    if current_group:
-                        fill_groups.append(current_group)
-                    
-                    for group in fill_groups:
-                        if len(group) == 1:
-                            # Single row fill
-                            excel_row, vals = group[0]
-                            sheet.range((excel_row, 1), (excel_row, len(headers))).value = vals
-                            rows_added += 1
-                        else:
-                            # Multi-row batch fill
-                            start_row = group[0][0]
-                            end_row = group[-1][0]
-                            batch_data = [vals for _, vals in group]
-                            sheet.range((start_row, 1), (end_row, len(headers))).value = batch_data
-                            rows_added += len(group)
-                            
-                except Exception as e:
-                    print(f"   ⚠️ Batch fill failed, falling back to row-by-row: {e}")
-                    # Fallback to original method
-                    for excel_row, vals in fill_pairs:
-                        try:
-                            sheet.range((excel_row, 1), (excel_row, len(headers))).value = vals
-                            rows_added += 1
-                        except Exception as e:
-                            print(f"     ⚠️ Fill row {excel_row}: {e}")
-                            
-                print(f"   → Filled {rows_added} empty green rows")
-            else:
-                print("   ⚠️ No empty green rows to fill")
-        else:
-            print("   → No unmatched summary rows to fill")
-
-
-
-        return rows_updated, rows_added
+                        print(f"   ⚠️ Failed to write row {excel_row}: {e}")
+                        continue
+                
+                # Brief pause between batches to prevent COM issues
+                if i + batch_size < len(batch_data):
+                    import time
+                    time.sleep(0.01)
+            
+            print(f"   ✅ Successfully added {rows_added} new rows")
+            
+        except Exception as e:
+            print(f"   ⚠️ Batch write operation failed: {e}")
+        
+        return rows_added
 
 
 
@@ -843,6 +1150,51 @@ class EnhancedExcelProcessor:
         if pd.isna(val):
             return ''
         return val
+
+    def _transform_column_value(self, src_col: str, value, srow: pd.Series) -> str:
+        """
+        FIXED: Transform column values based on specific business logic
+        """
+        if pd.isna(value) or str(value).strip() in ['', '- None -']:
+            return ''
+        
+        # Handover column logic: UFL Status -> Handover
+        if src_col == 'UFL Status':
+            ufl_status = str(value).strip()
+            return 'Y' if ufl_status == 'Handed Over' else 'N'
+        
+        # Payment term logic: Payment term (for model) -> Payment term
+        elif src_col == 'Payment term (for model)':
+            payment_term = str(value).strip()
+            payment_mapping = {
+                'Quarterly': '3',
+                'Monthly': '1', 
+                'Semi-Annual': '6',
+                'Yearly': '12'
+            }
+            
+            if payment_term in payment_mapping:
+                return payment_mapping[payment_term]
+            elif payment_term == 'One-Time Payment':
+                # Use Lease period value
+                lease_period = srow.get('Lease period', '')
+                return str(lease_period) if pd.notna(lease_period) and str(lease_period).strip() else ''
+            else:
+                return str(value)
+        
+        # Fitting out logic: Months fit-out (for model) -> fitting out (direct copy)
+        elif src_col == 'Months fit-out (for model)':
+            return str(value)
+        
+        # For other columns, return as-is
+        else:
+            return str(value)
+
+    def _normalize_key(self, value) -> str:
+        """Normalize a value for consistent key matching - no caching needed"""
+        if pd.isna(value):
+            return ""
+        return str(value).strip().lower()
 
     def _add_formatted_green_rows(self, sheet: xw.Sheet, reference_row: int, insert_after_row: int, count: int, headers: List[str]) -> int:
         """

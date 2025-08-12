@@ -2,3 +2,5 @@ pandas
 xlwings
 psutil
 openpyxl
+xlrd
+pyxlsb
