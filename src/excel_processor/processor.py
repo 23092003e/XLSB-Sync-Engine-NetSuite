@@ -102,16 +102,15 @@ class EnhancedExcelProcessor:
             return str(date_str).strip()
 
     def _is_within_90_days(self, date_str: str) -> bool:
-        """Check if the given date is within ±90 days from today"""
+        """Check if the given date is 90 days before today or any day after today"""
         parsed_date = self._parse_date_flexible(date_str)
         if parsed_date is None:
             return False
 
         today = datetime.now()
         lower_bound = today - timedelta(days=90)
-        upper_bound = today + timedelta(days=90)
 
-        return lower_bound <= parsed_date <= upper_bound
+        return parsed_date >= lower_bound
 
     def _parse_phase_column(self, phase_str: str) -> dict:
 
@@ -217,7 +216,7 @@ class EnhancedExcelProcessor:
         return True
 
     def _filter_summary_by_start_date(self, summary_subset: pd.DataFrame) -> pd.DataFrame:
-        """Filter summary data to only include records with Start date within 90 days"""
+        """Filter summary data to only include records with Start date from 90 days before today and all days after"""
         if summary_subset.empty:
             return summary_subset
         
@@ -237,22 +236,22 @@ class EnhancedExcelProcessor:
         start_date_columns = list(dict.fromkeys(start_date_columns))
         
         if not start_date_columns:
-            print("   ⚠️ No Start date column found - skipping 90-day filter")
+            print("   ⚠️ No Start date column found - skipping date filter")
             return summary_subset
         
         # Use the first matching column
         start_date_col = start_date_columns[0]
-        print(f"   📅 Using '{start_date_col}' column for 90-day filtering")
+        print(f"   📅 Using '{start_date_col}' column for date filtering (90 days before today and all days after)")
         
         # Apply the filter
         original_count = len(summary_subset)
-        within_90_days_mask = summary_subset[start_date_col].apply(self._is_within_90_days)
-        filtered_subset = summary_subset[within_90_days_mask].copy()
+        within_range_mask = summary_subset[start_date_col].apply(self._is_within_90_days)
+        filtered_subset = summary_subset[within_range_mask].copy()
         
         filtered_count = len(filtered_subset)
         excluded_count = original_count - filtered_count
         
-        print(f"   📊 90-day filter: {filtered_count} included, {excluded_count} excluded")
+        print(f"   📊 Date filter: {filtered_count} included, {excluded_count} excluded")
         
         return filtered_subset
 
@@ -1156,13 +1155,15 @@ class EnhancedExcelProcessor:
         """
         FIXED: Transform column values based on specific business logic
         """
-        if pd.isna(value) or str(value).strip() in ['', '- None -']:
-            return ''
-        
-        # Handover column logic: UFL Status -> Handover
         if src_col == 'UFL Status':
-            ufl_status = str(value).strip()
-            return 'Y' if ufl_status == 'Handed Over' else 'N'
+            if pd.isna(value):
+                return 'N'
+            ufl_status = str(value).strip().lower()
+            return 'Y' if 'Handed Over' in ufl_status else 'N'
+        
+        # General empty check for other columns
+        if pd.isna(value) or str(value).strip() in ['', '- None -']:
+            return 'N'
         
         # Payment term logic: Payment term (for model) -> Payment term
         elif src_col == 'Payment term (for model)':
