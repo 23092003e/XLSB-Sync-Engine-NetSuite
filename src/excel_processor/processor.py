@@ -216,7 +216,7 @@ class EnhancedExcelProcessor:
         return True
 
     def _filter_summary_by_start_date(self, summary_subset: pd.DataFrame) -> pd.DataFrame:
-        """Filter summary data to only include records with Start date from 90 days before today and all days after"""
+        """Filter summary data to only include records with Start date within 90 days"""
         if summary_subset.empty:
             return summary_subset
         
@@ -236,22 +236,22 @@ class EnhancedExcelProcessor:
         start_date_columns = list(dict.fromkeys(start_date_columns))
         
         if not start_date_columns:
-            print("   ⚠️ No Start date column found - skipping date filter")
+            print("   ⚠️ No Start date column found - skipping 90-day filter")
             return summary_subset
         
         # Use the first matching column
         start_date_col = start_date_columns[0]
-        print(f"   📅 Using '{start_date_col}' column for date filtering (90 days before today and all days after)")
+        print(f"   📅 Using '{start_date_col}' column for 90-day filtering")
         
         # Apply the filter
         original_count = len(summary_subset)
-        within_range_mask = summary_subset[start_date_col].apply(self._is_within_90_days)
-        filtered_subset = summary_subset[within_range_mask].copy()
+        within_90_days_mask = summary_subset[start_date_col].apply(self._is_within_90_days)
+        filtered_subset = summary_subset[within_90_days_mask].copy()
         
         filtered_count = len(filtered_subset)
         excluded_count = original_count - filtered_count
         
-        print(f"   📊 Date filter: {filtered_count} included, {excluded_count} excluded")
+        print(f"   📊 90-day filter: {filtered_count} included, {excluded_count} excluded")
         
         return filtered_subset
 
@@ -1155,15 +1155,13 @@ class EnhancedExcelProcessor:
         """
         FIXED: Transform column values based on specific business logic
         """
-        if src_col == 'UFL Status':
-            if pd.isna(value):
-                return 'N'
-            ufl_status = str(value).strip().lower()
-            return 'Y' if 'Handed Over' in ufl_status else 'N'
-        
         # General empty check for other columns
         if pd.isna(value) or str(value).strip() in ['', '- None -']:
             return 'N'
+        
+        if src_col == 'UFL Status':
+            ufl_status = str(value).strip().lower()
+            return 'Y' if 'handed over' in ufl_status else 'N'
         
         # Payment term logic: Payment term (for model) -> Payment term
         elif src_col == 'Payment term (for model)':
@@ -1191,7 +1189,6 @@ class EnhancedExcelProcessor:
         # For other columns, return as-is
         else:
             return str(value)
-
     def _normalize_key(self, value) -> str:
         """Normalize a value for consistent key matching - no caching needed"""
         if pd.isna(value):
