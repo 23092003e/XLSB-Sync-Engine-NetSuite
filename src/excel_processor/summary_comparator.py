@@ -310,7 +310,6 @@ class SummaryComparator:
                         
                         if new_val != old_val:
                             has_changes = True
-                            print(f"   📝 Row {idx+2} changed: {new_col} '{old_val}' → '{new_val}'")
                             break
                 
                 if has_changes:
@@ -426,7 +425,6 @@ class SummaryComparator:
                         range_obj = sheet.range((row_num, 1), (row_num, max_col))
                         range_obj.color = (173, 216, 230)  # Light blue for changed rows
                         highlighted_count += 1
-                        print(f"   ✅ Highlighted row {row_num}")
                     except Exception as e:
                         print(f"   ⚠️ Failed to highlight row {row_num}: {e}")
                 
