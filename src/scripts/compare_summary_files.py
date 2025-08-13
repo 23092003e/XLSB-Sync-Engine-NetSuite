@@ -133,13 +133,11 @@ if __name__ == "__main__":
     
     if len(sys.argv) < 3:
         print("Usage: python compare_summary_files.py <summary_old_path> <summary_new_path> [mode]")
-        print("
-Modes:")
+        print("Modes:")
         print("  highlight (default) - Compare and highlight changes")
         print("  log                 - Generate detailed log only")
         print("  both               - Compare, highlight, and generate log")
-        print("
-Examples:")
+        print("Examples:")
         print("python compare_summary_files.py 'IPA PLC Annex T7.xlsx' 'IPA PLC Annex T8.xlsx'")
         print("python compare_summary_files.py 'Summary_Jan.xlsx' 'Summary_Feb.xlsx' log")
         print("python compare_summary_files.py 'Previous.xlsx' 'Current.xlsx' both")
