@@ -10,6 +10,7 @@ from .models import ProcessingConfig, ProcessingResult
 from .com_management import COMManager, EnhancedExcelOptimizer
 from .subsidiary import SubsidiaryExtractor
 from .memory_optimizer import MemoryOptimizer
+from .summary_comparator import SummaryComparator
 
 # Import the new modules
 from .exceptions import *
@@ -1157,7 +1158,7 @@ class EnhancedExcelProcessor:
         """
         # General empty check for other columns
         if pd.isna(value) or str(value).strip() in ['', '- None -']:
-            return 'N'
+            return ''
         
         if src_col == 'UFL Status':
             ufl_status = str(value).strip().lower()
@@ -1302,3 +1303,67 @@ class EnhancedExcelProcessor:
         """Legacy method - kept for backward compatibility"""
         print(f"   ⚠️ Using legacy row addition method - formatting may not be preserved")
         return self._add_formatted_green_rows(sheet, start_row - 1, start_row - 1, count, headers)
+
+    def compare_and_highlight_summary_files(self, summary_old_path: str, summary_new_path: str, generate_log: bool = True, log_file_path: str = None) -> bool:
+        """
+        Compare summary_old (previous period) vs summary_new (current period) Summary files
+        and highlight changes in summary_new
+        
+        Args:
+            summary_old_path: Path to previous period Summary file
+            summary_new_path: Path to current period Summary file
+            generate_log: Whether to generate detailed change log file
+            log_file_path: Optional custom path for log file
+        
+        Returns:
+            True if comparison and highlighting completed successfully
+        """
+        try:
+            print("🔍 Starting Summary file comparison...")
+            
+            # Create comparator instance
+            comparator = SummaryComparator()
+            
+            # Perform comparison and highlighting with optional logging
+            success = comparator.process_summary_comparison(summary_old_path, summary_new_path, generate_log, log_file_path)
+            
+            if success:
+                print("   ✅ Summary file comparison and highlighting completed!")
+            else:
+                print("   ❌ Summary file comparison failed")
+            
+            return success
+            
+        except Exception as e:
+            print(f"   ❌ Error in summary comparison: {e}")
+            return False
+    
+    def apply_summary_highlighting(self, summary_path: str, changed_rows: set) -> bool:
+        """
+        Apply highlighting to specific rows in Summary file
+        
+        Args:
+            summary_path: Path to Summary file to highlight
+            changed_rows: Set of row numbers (1-indexed) to highlight
+        
+        Returns:
+            True if highlighting was successful
+        """
+        try:
+            if not changed_rows:
+                print("   ℹ️ No rows to highlight in Summary file")
+                return True
+                
+            print(f"🎨 Applying highlighting to {len(changed_rows)} rows in Summary file")
+            
+            # Create comparator instance for highlighting functionality
+            comparator = SummaryComparator()
+            
+            # Apply highlighting
+            success = comparator.apply_highlighting_to_summary(summary_path, changed_rows)
+            
+            return success
+            
+        except Exception as e:
+            print(f"   ❌ Error applying summary highlighting: {e}")
+            return False
