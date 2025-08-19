@@ -236,16 +236,16 @@ class SummaryComparator:
             for engine in engines:
                 try:
                     df = pd.read_excel(file_path, engine=engine)
-                    print(f"   ✅ Loaded {file_path} using {engine} engine")
+                    print(f"   Loaded {file_path} using {engine} engine")
                     return df
                 except Exception as e:
-                    print(f"   ⚠️ Failed to load with {engine}: {e}")
+                    print(f"   Failed to load with {engine}: {e}")
                     continue
             
             raise Exception(f"Failed to load {file_path} with any engine")
             
         except Exception as e:
-            print(f"   ❌ Error loading {file_path}: {e}")
+            print(f"   Error loading {file_path}: {e}")
             raise
     
     def normalize_row_key(self, row: pd.Series) -> str:
@@ -271,7 +271,7 @@ class SummaryComparator:
             Dict with 'changed_cells': dict mapping row indices to sets of changed column names,
             and 'changed_rows': set of row indices (for backward compatibility)
         """
-        print(f"🔍 Comparing Summary files:")
+        print(f"Comparing Summary files:")
         print(f"   Previous: {summary_old_path}")
         print(f"   Current:  {summary_new_path}")
         
@@ -324,10 +324,10 @@ class SummaryComparator:
                 # Only include columns that actually exist in the new dataframe
                 changed_columns = {col for col in changed_columns if col in new_df.columns}
                 changed_cells[row_num] = changed_columns
-                print(f"   🆕 Row {row_num} is new in current file")
+                print(f"   Row {row_num} is new in current file")
         
-        print(f"   🎯 Found {len(changed_rows)} changed/new rows in current file")
-        print(f"   🎯 Found {sum(len(cols) for cols in changed_cells.values())} individual cell changes")
+        print(f"   Found {len(changed_rows)} changed/new rows in current file")
+        print(f"   Found {sum(len(cols) for cols in changed_cells.values())} individual cell changes")
         
         return {
             'changed_rows': changed_rows,
@@ -416,11 +416,11 @@ class SummaryComparator:
         changed_rows = comparison_result.get('changed_rows', set())
         
         if not changed_cells and not changed_rows:
-            print("   ℹ️ No cells to highlight in Summary file")
+            print("   No cells to highlight in Summary file")
             return True
         
         try:
-            print(f"🎨 Applying cell-specific highlighting to Summary file")
+            print(f"Applying cell-specific highlighting to Summary file")
             print(f"   Rows with changes: {len(changed_rows)}")
             print(f"   Total changed cells: {sum(len(cols) for cols in changed_cells.values())}")
             
@@ -433,7 +433,7 @@ class SummaryComparator:
                 # Get column mapping for the sheet
                 header_row = sheet.range('1:1').value
                 if not header_row:
-                    print("   ❌ Could not read header row")
+                    print("   Could not read header row")
                     return False
                 
                 # Create column name to column number mapping
@@ -466,14 +466,14 @@ class SummaryComparator:
                                 cell.color = (173, 216, 230)  # Light blue for changed cells
                                 highlighted_cells += 1
                             else:
-                                print(f"   ⚠️ Could not find column '{col_name}' in header row")
+                                print(f"   Could not find column '{col_name}' in header row")
                     
                     except Exception as e:
-                        print(f"   ⚠️ Failed to highlight cells in row {row_num}: {e}")
+                        print(f"   Failed to highlight cells in row {row_num}: {e}")
                 
                 # Save the file
                 wb.save()
-                print(f"   💾 Saved Summary file with {highlighted_cells} highlighted cells")
+                print(f"   Saved Summary file with {highlighted_cells} highlighted cells")
                 
                 return True
                 
@@ -482,7 +482,7 @@ class SummaryComparator:
                 app.quit()
                 
         except Exception as e:
-            print(f"   ❌ Error applying highlighting to Summary file: {e}")
+            print(f"   Error applying highlighting to Summary file: {e}")
             return False
     
     def process_summary_comparison(self, summary_old_path: str, summary_new_path: str, generate_log: bool = True, log_file_path: str = None) -> bool:
@@ -501,17 +501,17 @@ class SummaryComparator:
         try:
             # Validate files exist
             if not os.path.exists(summary_old_path):
-                print(f"   ❌ Previous file not found: {summary_old_path}")
+                print(f"   Previous file not found: {summary_old_path}")
                 return False
             
             if not os.path.exists(summary_new_path):
-                print(f"   ❌ Current file not found: {summary_new_path}")
+                print(f"   Current file not found: {summary_new_path}")
                 return False
             
             # Generate detailed log if requested
             if generate_log:
                 log_path = self.generate_detailed_change_log(summary_old_path, summary_new_path, log_file_path)
-                print(f"   📄 Detailed log saved: {log_path}")
+                print(f"   Detailed log saved: {log_path}")
             
             # Compare files for highlighting (now returns detailed comparison results)
             comparison_results = self.compare_summary_files(summary_old_path, summary_new_path)
@@ -522,14 +522,14 @@ class SummaryComparator:
             success = self.apply_highlighting_to_summary(summary_new_path, comparison_results)
             
             if success:
-                print(f"   🎉 Summary comparison completed successfully!")
-                print(f"   📊 Total rows with changes: {len(changed_rows)}")
-                print(f"   📊 Total individual cells highlighted: {sum(len(cols) for cols in changed_cells.values())}")
+                print(f"   Summary comparison completed successfully!")
+                print(f"   Total rows with changes: {len(changed_rows)}")
+                print(f"   Total individual cells highlighted: {sum(len(cols) for cols in changed_cells.values())}")
                 if generate_log:
-                    print(f"   📋 Detailed change log: {log_path}")
+                    print(f"   Detailed change log: {log_path}")
             
             return success
             
         except Exception as e:
-            print(f"   ❌ Error in summary comparison process: {e}")
+            print(f"   Error in summary comparison process: {e}")
             return False

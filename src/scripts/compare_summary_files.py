@@ -128,7 +128,7 @@ def compare_with_log(summary_old_path: str, summary_new_path: str, log_file_path
 
 if __name__ == "__main__":
     # Example usage
-    print("📋 Summary File Comparison Tool")
+    print("Summary File Comparison Tool")
     print("-" * 40)
     
     if len(sys.argv) < 3:
@@ -158,12 +158,12 @@ if __name__ == "__main__":
     
     # Validate mode
     if mode not in ["highlight", "log", "both"]:
-        print(f"❌ Invalid mode: {mode}. Use 'highlight', 'log', or 'both'")
+        print(f"Invalid mode: {mode}. Use 'highlight', 'log', or 'both'")
         sys.exit(1)
     
-    print(f"📁 Previous: {summary_old_file}")
-    print(f"📁 Current:  {summary_new_file}")
-    print(f"🔧 Mode: {mode}")
+    print(f"Previous: {summary_old_file}")
+    print(f"Current:  {summary_new_file}")
+    print(f"Mode: {mode}")
     print()
     
     # Run based on mode

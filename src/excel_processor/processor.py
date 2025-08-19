@@ -1425,7 +1425,7 @@ class EnhancedExcelProcessor:
             True if comparison and highlighting completed successfully
         """
         try:
-            print("🔍 Starting Summary file comparison...")
+            print("Starting Summary file comparison...")
             
             # Create comparator instance
             comparator = SummaryComparator()
@@ -1434,14 +1434,14 @@ class EnhancedExcelProcessor:
             success = comparator.process_summary_comparison(summary_old_path, summary_new_path, generate_log, log_file_path)
             
             if success:
-                print("   ✅ Summary file comparison and highlighting completed!")
+                print("   Summary file comparison and highlighting completed!")
             else:
-                print("   ❌ Summary file comparison failed")
+                print("   Summary file comparison failed")
             
             return success
             
         except Exception as e:
-            print(f"   ❌ Error in summary comparison: {e}")
+            print(f"   Error in summary comparison: {e}")
             return False
     
     def apply_summary_highlighting(self, summary_path: str, changed_rows: set) -> bool:
