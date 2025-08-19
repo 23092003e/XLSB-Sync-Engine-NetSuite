@@ -259,16 +259,17 @@ class SummaryComparator:
                 key_parts.append('')
         return '|'.join(key_parts)
     
-    def compare_summary_files(self, summary_old_path: str, summary_new_path: str) -> Dict[str, Set[int]]:
+    def compare_summary_files(self, summary_old_path: str, summary_new_path: str) -> Dict[str, any]:
         """
-        Compare summary_old vs summary_new and return row indices that changed
+        Compare summary_old vs summary_new and return specific cells that changed
         
         Args:
             summary_old_path: Path to previous period Summary file
             summary_new_path: Path to current period Summary file
         
         Returns:
-            Dict with 'changed_rows': set of row indices in summary_new that have changes
+            Dict with 'changed_cells': dict mapping row indices to sets of changed column names,
+            and 'changed_rows': set of row indices (for backward compatibility)
         """
         print(f"🔍 Comparing Summary files:")
         print(f"   Previous: {summary_old_path}")
@@ -290,10 +291,12 @@ class SummaryComparator:
         print(f"   Previous lookup created with {len(old_lookup)} unique keys")
         
         changed_rows = set()
+        changed_cells = {}  # row_num -> set of changed column names
         
         # Compare each row in new file with corresponding row in old file
         for idx, new_row in new_df.iterrows():
             new_key = self.normalize_row_key(new_row)
+            row_num = idx + 2  # +2 for Excel row number (1-indexed + header)
             
             if not new_key or new_key == '||':
                 continue
@@ -301,27 +304,35 @@ class SummaryComparator:
             if new_key in old_lookup:
                 old_row = old_lookup[new_key]
                 
-                # Check if any tracked columns have changed
-                has_changes = False
+                # Check each tracked column for changes
+                changed_columns = set()
                 for new_col, old_col in self.tracked_columns.items():
                     if new_col in new_df.columns and old_col in old_df.columns:
                         new_val = self._normalize_value(new_row.get(new_col), new_col)
                         old_val = self._normalize_value(old_row.get(old_col), old_col)
                         
                         if new_val != old_val:
-                            has_changes = True
-                            break
+                            changed_columns.add(new_col)
                 
-                if has_changes:
-                    changed_rows.add(idx + 2)  # +2 for Excel row number (1-indexed + header)
+                if changed_columns:
+                    changed_rows.add(row_num)
+                    changed_cells[row_num] = changed_columns
             else:
-                # New row in current file
-                changed_rows.add(idx + 2)
-                print(f"   🆕 Row {idx+2} is new in current file")
+                # New row in current file - mark all tracked columns as changed
+                changed_rows.add(row_num)
+                changed_columns = set(self.tracked_columns.keys())
+                # Only include columns that actually exist in the new dataframe
+                changed_columns = {col for col in changed_columns if col in new_df.columns}
+                changed_cells[row_num] = changed_columns
+                print(f"   🆕 Row {row_num} is new in current file")
         
         print(f"   🎯 Found {len(changed_rows)} changed/new rows in current file")
+        print(f"   🎯 Found {sum(len(cols) for cols in changed_cells.values())} individual cell changes")
         
-        return {'changed_rows': changed_rows}
+        return {
+            'changed_rows': changed_rows,
+            'changed_cells': changed_cells
+        }
     
     def _normalize_value(self, value, column_name: str = '') -> str:
         """Normalize value for comparison based on column type"""
@@ -390,23 +401,28 @@ class SummaryComparator:
         # Default: return normalized string
         return str_val.lower()
     
-    def apply_highlighting_to_summary(self, summary_path: str, changed_rows: Set[int]) -> bool:
+    def apply_highlighting_to_summary(self, summary_path: str, comparison_result: Dict[str, any]) -> bool:
         """
-        Apply highlighting to changed rows in the Summary file
+        Apply highlighting to specific changed cells in the Summary file
         
         Args:
             summary_path: Path to the T8 Summary file
-            changed_rows: Set of row numbers (1-indexed) to highlight
+            comparison_result: Result from compare_summary_files containing changed_cells and changed_rows
         
         Returns:
             True if highlighting was successful, False otherwise
         """
-        if not changed_rows:
-            print("   ℹ️ No rows to highlight in Summary file")
+        changed_cells = comparison_result.get('changed_cells', {})
+        changed_rows = comparison_result.get('changed_rows', set())
+        
+        if not changed_cells and not changed_rows:
+            print("   ℹ️ No cells to highlight in Summary file")
             return True
         
         try:
-            print(f"🎨 Applying highlighting to {len(changed_rows)} rows in Summary file")
+            print(f"🎨 Applying cell-specific highlighting to Summary file")
+            print(f"   Rows with changes: {len(changed_rows)}")
+            print(f"   Total changed cells: {sum(len(cols) for cols in changed_cells.values())}")
             
             # Open the file with xlwings
             app = xw.App(visible=False, add_book=False)
@@ -414,23 +430,50 @@ class SummaryComparator:
                 wb = app.books.open(summary_path)
                 sheet = wb.sheets[0]  # Assume first sheet
                 
-                # Get the number of columns to highlight
-                used_range = sheet.used_range
-                max_col = used_range.last_cell.column
+                # Get column mapping for the sheet
+                header_row = sheet.range('1:1').value
+                if not header_row:
+                    print("   ❌ Could not read header row")
+                    return False
                 
-                highlighted_count = 0
-                for row_num in sorted(changed_rows):
+                # Create column name to column number mapping
+                col_mapping = {}
+                for col_idx, col_name in enumerate(header_row):
+                    if col_name:
+                        col_mapping[str(col_name).strip()] = col_idx + 1
+                
+                highlighted_cells = 0
+                for row_num, changed_column_names in changed_cells.items():
                     try:
-                        # Highlight entire row with light blue background
-                        range_obj = sheet.range((row_num, 1), (row_num, max_col))
-                        range_obj.color = (173, 216, 230)  # Light blue for changed rows
-                        highlighted_count += 1
+                        for col_name in changed_column_names:
+                            # Find the column number for this column name
+                            col_num = None
+                            
+                            # Direct match first
+                            if col_name in col_mapping:
+                                col_num = col_mapping[col_name]
+                            else:
+                                # Try fuzzy matching for column names
+                                for header_col, header_col_num in col_mapping.items():
+                                    if col_name.lower().strip() in header_col.lower().strip() or \
+                                       header_col.lower().strip() in col_name.lower().strip():
+                                        col_num = header_col_num
+                                        break
+                            
+                            if col_num:
+                                # Highlight the specific cell with light blue background
+                                cell = sheet.range((row_num, col_num))
+                                cell.color = (173, 216, 230)  # Light blue for changed cells
+                                highlighted_cells += 1
+                            else:
+                                print(f"   ⚠️ Could not find column '{col_name}' in header row")
+                    
                     except Exception as e:
-                        print(f"   ⚠️ Failed to highlight row {row_num}: {e}")
+                        print(f"   ⚠️ Failed to highlight cells in row {row_num}: {e}")
                 
                 # Save the file
                 wb.save()
-                print(f"   💾 Saved Summary file with {highlighted_count} highlighted rows")
+                print(f"   💾 Saved Summary file with {highlighted_cells} highlighted cells")
                 
                 return True
                 
@@ -470,16 +513,18 @@ class SummaryComparator:
                 log_path = self.generate_detailed_change_log(summary_old_path, summary_new_path, log_file_path)
                 print(f"   📄 Detailed log saved: {log_path}")
             
-            # Compare files for highlighting
+            # Compare files for highlighting (now returns detailed comparison results)
             comparison_results = self.compare_summary_files(summary_old_path, summary_new_path)
             changed_rows = comparison_results['changed_rows']
+            changed_cells = comparison_results['changed_cells']
             
-            # Apply highlighting
-            success = self.apply_highlighting_to_summary(summary_new_path, changed_rows)
+            # Apply cell-specific highlighting
+            success = self.apply_highlighting_to_summary(summary_new_path, comparison_results)
             
             if success:
                 print(f"   🎉 Summary comparison completed successfully!")
-                print(f"   📊 Total changes highlighted: {len(changed_rows)}")
+                print(f"   📊 Total rows with changes: {len(changed_rows)}")
+                print(f"   📊 Total individual cells highlighted: {sum(len(cols) for cols in changed_cells.values())}")
                 if generate_log:
                     print(f"   📋 Detailed change log: {log_path}")
             

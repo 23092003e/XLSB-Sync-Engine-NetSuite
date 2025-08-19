@@ -20,6 +20,7 @@ COLUMN_MAPPING = {
     'UFL Status': 'Handover',
     'Payment term (for model)': 'Payment term',
     'Months fit-out (for model)': 'Fitting out'
+    
 }
 
 def get_optimal_worker_count() -> int:

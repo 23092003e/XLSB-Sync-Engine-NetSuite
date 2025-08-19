@@ -585,6 +585,10 @@ class EnhancedExcelProcessor:
                 return result
 
             print(f"\n🔄 Processing: {filepath}")
+            
+            # Initialize collection for 'Add New' rows
+            self.collected_add_new_rows = []
+            
             # Use connection pooling for better resource management
             app_id = f"worker_{hash(filepath) % 100}"  # Distribute files across app pool
             app = COMManager.get_or_create_excel_app(app_id)
@@ -647,11 +651,20 @@ class EnhancedExcelProcessor:
             wb.close()
             MemoryOptimizer.cleanup_memory()
 
+            # Create output sheet with collected 'Add New' rows
+            if hasattr(self, 'collected_add_new_rows') and self.collected_add_new_rows:
+                print(f"   📝 Creating output sheet with {len(self.collected_add_new_rows)} 'Add New' rows...")
+                output_success = self.create_output_sheet_with_add_new_rows(filepath, headers)
+                if output_success:
+                    print("   ✅ Output sheet created successfully")
+                else:
+                    print("   ⚠️ Output sheet creation failed")
+
             result.status = 'success'
             result.rows_updated = rows_updated
             result.rows_added = rows_added
             result.processing_time = time.time() - start
-            print(f"   ✅ Success: {rows_updated} updated, {rows_added} added ({result.processing_time:.1f}s)")
+            print(f"   ✅ Success: {rows_updated} updated, {rows_added} collected for output ({result.processing_time:.1f}s)")
 
         except Exception as e:
             result.error_message = str(e)
@@ -807,6 +820,7 @@ class EnhancedExcelProcessor:
         """
         OPTIMIZED: Enhanced processing with vectorized operations and O(n) complexity.
         Filters summary data by 90-day date condition and ensures no duplicates.
+        Now collects 'Add New' rows for output sheet instead of inserting into entities.
         """
         import time
         start_time = time.time()
@@ -855,15 +869,207 @@ class EnhancedExcelProcessor:
             print("   ➡️ No new rows to add (all filtered summary rows already exist)")
             return 0, 0
         
-        # OPTIMIZATION 5: Batch processing for row operations
-        rows_added = self._process_new_rows_optimized(
-            sheet, df, headers, header_row, new_summary_rows, df_item2_clean, df_note_clean
-        )
+        # NEW LOGIC: Collect 'Add New' rows instead of inserting into entities
+        print(f"   📊 Collecting {len(new_summary_rows)} 'Add New' rows for output sheet")
+        
+        # Store the collected rows in instance variable for later processing
+        if not hasattr(self, 'collected_add_new_rows'):
+            self.collected_add_new_rows = []
+        
+        # Convert new summary rows to proper format with all columns A to AG
+        column_mapping = self.config.column_mapping
+        
+        for summary_idx, srow in new_summary_rows:
+            # Create row data matching the entity structure (columns A to AG)
+            row_data = [''] * len(headers)
+            
+            # Set the standard identifiers for leasing rows first
+            if 'Item2' in headers:
+                row_data[headers.index('Item2')] = 'Leasing period'
+            if 'Note' in headers:
+                row_data[headers.index('Note')] = 'Committed'
+            
+            # Map each column properly using the column mapping from config
+            for col_idx, col_name in enumerate(headers):
+                # Use the existing _get_column_value_optimized method that handles all mapping correctly
+                val = self._get_column_value_optimized(col_name, srow, column_mapping)
+                if val:  # Only override if we have a value
+                    row_data[col_idx] = self._ensure_scalar(val)
+            
+            # Ensure the standard identifiers are preserved (in case they got overwritten)
+            if 'Item2' in headers:
+                row_data[headers.index('Item2')] = 'Leasing period'
+            if 'Note' in headers:
+                row_data[headers.index('Note')] = 'Committed'
+            
+            self.collected_add_new_rows.append(row_data)
         
         processing_time = time.time() - start_time
         print(f"   ⏱️ Processing completed in {processing_time:.2f}s")
+        print(f"   📋 Total collected 'Add New' rows: {len(self.collected_add_new_rows)}")
         
-        return 0, rows_added  # rows_updated always 0 since we don't update existing rows
+        return 0, len(new_summary_rows)  # rows_updated always 0 since we don't update existing rows  # rows_updated always 0 since we don't update existing rows  # rows_updated always 0 since we don't update existing rows  # rows_updated always 0 since we don't update existing rows
+
+    def create_output_sheet_with_add_new_rows(self, original_filepath: str, headers: List[str]) -> bool:
+        """
+        Create a new Excel sheet with all collected 'Add New' rows.
+        
+        Args:
+            original_filepath: Path to the original file for naming the output
+            headers: Column headers from A to AG
+            
+        Returns:
+            True if output sheet was created successfully
+        """
+        if not hasattr(self, 'collected_add_new_rows') or not self.collected_add_new_rows:
+            print("   ℹ️ No 'Add New' rows to export to output sheet")
+            return True
+        
+        try:
+            import os
+            from pathlib import Path
+            
+            # Generate output filename
+            original_path = Path(original_filepath)
+            output_filename = f"{original_path.stem}_output{original_path.suffix}"
+            output_filepath = original_path.parent / output_filename
+            
+            print(f"   📝 Creating output sheet: {output_filepath}")
+            print(f"   📊 Writing {len(self.collected_add_new_rows)} 'Add New' rows")
+            
+            # Initialize Excel application
+            app = None
+            wb = None
+            
+            try:
+                if not COMManager.initialize_com():
+                    print("   ❌ COM initialization failed")
+                    return False
+                
+                app_id = f"output_writer_{hash(original_filepath) % 100}"
+                app = COMManager.get_or_create_excel_app(app_id)
+                if not app:
+                    print("   ❌ Could not initialize Excel application")
+                    return False
+                
+                # Create new workbook
+                wb = app.books.add()
+                sheet = wb.sheets[0]  # Use the default sheet
+                sheet.name = "Add New Data"
+                
+                # Write headers (row 1)
+                if headers:
+                    header_range = sheet.range((1, 1), (1, len(headers)))
+                    header_range.value = headers
+                    
+                    # Format headers only - no row coloring
+                    header_range.font.bold = True
+                    header_range.color = (200, 200, 200)  # Light gray background for headers only
+                
+                # Write data rows starting from row 2 WITHOUT any row coloring
+                if self.collected_add_new_rows:
+                    data_start_row = 2
+                    
+                    # Process each row to ensure proper formatting
+                    for i, row_data in enumerate(self.collected_add_new_rows):
+                        row_num = data_start_row + i
+                        
+                        # Apply format fixes before writing
+                        formatted_row = self._format_row_for_output(row_data, headers)
+                        
+                        # Write the row data
+                        row_range = sheet.range((row_num, 1), (row_num, len(headers)))
+                        row_range.value = formatted_row
+                        
+                        # Apply only essential formatting (no background colors)
+                        row_range.api.Borders.LineStyle = 1  # xlContinuous - borders only
+                
+                # Auto-fit columns for better readability
+                sheet.autofit('c')
+                
+                # Save the workbook
+                wb.save(str(output_filepath))
+                print(f"   ✅ Output sheet saved successfully: {output_filepath}")
+                
+                return True
+                
+            finally:
+                try:
+                    if wb:
+                        wb.close()
+                    if app and 'app_id' in locals():
+                        COMManager.release_excel_app(app_id)
+                    elif app:
+                        app.quit()
+                except Exception as cleanup_error:
+                    print(f"   ⚠️ Excel cleanup warning: {cleanup_error}")
+                
+        except Exception as e:
+            print(f"   ❌ Error creating output sheet: {e}")
+            return False
+
+    def _format_row_for_output(self, row_data: List, headers: List[str]) -> List:
+        """
+        Format row data for output sheet to ensure compatibility with model.
+        
+        Args:
+            row_data: List of values for the row
+            headers: Column headers
+            
+        Returns:
+            Formatted row data
+        """
+        formatted_row = row_data.copy()
+        
+        # Handle Handover column - set to "N" if empty
+        if 'Handover' in headers:
+            handover_idx = headers.index('Handover')
+            if not formatted_row[handover_idx] or str(formatted_row[handover_idx]).strip() == '':
+                formatted_row[handover_idx] = 'N'
+        
+        # Format dates to ensure consistency with model
+        date_columns = ['Start date', 'End date']
+        for date_col in date_columns:
+            if date_col in headers:
+                date_idx = headers.index(date_col)
+                if formatted_row[date_idx] and str(formatted_row[date_idx]).strip():
+                    # Parse and reformat date to ensure MM/DD/YYYY format
+                    parsed_date = self._parse_date_flexible(str(formatted_row[date_idx]))
+                    if parsed_date:
+                        formatted_row[date_idx] = parsed_date.strftime('%m/%d/%Y')
+        
+        # Format numeric columns
+        numeric_columns = ['GLA', 'Rent (USD)', 'Rent (VND)', 'Service charge', 'Growth rate (Act)', 
+                          'Payment term', 'Fitting out', 'Rent free']
+        for num_col in numeric_columns:
+            if num_col in headers:
+                num_idx = headers.index(num_col)
+                if formatted_row[num_idx] and str(formatted_row[num_idx]).strip():
+                    try:
+                        # Clean up numeric values - remove commas, ensure proper format
+                        val_str = str(formatted_row[num_idx]).replace(',', '').strip()
+                        if val_str and val_str != '':
+                            # Try to parse as float first
+                            val_float = float(val_str)
+                            # If it's a whole number, format as integer
+                            if val_float.is_integer():
+                                formatted_row[num_idx] = str(int(val_float))
+                            else:
+                                formatted_row[num_idx] = str(val_float)
+                    except (ValueError, TypeError):
+                        # Keep original value if parsing fails
+                        pass
+        
+        # Ensure text fields are properly formatted
+        text_columns = ['Factory code', 'Tenant code', 'Tenant name', 'Existing/New/Exp/Renew', 'Broker']
+        for text_col in text_columns:
+            if text_col in headers:
+                text_idx = headers.index(text_col)
+                if formatted_row[text_idx]:
+                    # Clean up text - remove extra spaces, ensure string format
+                    formatted_row[text_idx] = str(formatted_row[text_idx]).strip()
+        
+        return formatted_row
 
     def _build_existing_keys_vectorized(self, df_block: pd.DataFrame) -> set:
         """OPTIMIZED: Build existing keys using vectorized operations - O(n)"""
@@ -923,112 +1129,6 @@ class EnhancedExcelProcessor:
         
         return new_rows
 
-    def _process_new_rows_optimized(
-        self, sheet: xw.Sheet, df: pd.DataFrame, headers: List[str], 
-        header_row: int, new_summary_rows: List, df_item2_clean: pd.Series, df_note_clean: pd.Series
-    ) -> int:
-        """OPTIMIZED: Process new rows with batch operations and minimal Excel calls"""
-        
-        # OPTIMIZATION: Reuse pre-computed clean columns
-        empty_green_mask = (
-            (df_item2_clean == 'leasing period') & 
-            (df_note_clean == 'committed') & 
-            (df['Factory code'].astype('string').str.strip() == '') &
-            (df['Tenant code'].astype('string').str.strip() == '') &
-            (df['Tenant name'].astype('string').str.strip() == '')
-        )
-        empty_green_rows = df[empty_green_mask]
-        
-        empty_count = len(empty_green_rows)
-        new_rows_count = len(new_summary_rows)
-        
-        print(f"   📊 Empty green rows available: {empty_count}")
-        print(f"   📊 New summary rows to add: {new_rows_count}")
-        
-        # Auto-add green rows if needed
-        if empty_count < new_rows_count:
-            rows_needed = new_rows_count - empty_count
-            buffer_rows = max(5, rows_needed)  # Smaller buffer for efficiency
-            total_rows_to_add = rows_needed + buffer_rows
-            
-            print(f"   🔄 Auto-adding {total_rows_to_add} green rows ({rows_needed} needed + {buffer_rows} buffer)")
-            
-            if self._auto_add_green_rows(sheet, df, headers, header_row, total_rows_to_add):
-                # Re-read and recalculate after adding rows
-                updated_headers, updated_data = self._batch_read_enhanced(sheet, header_row)
-                df = pd.DataFrame(updated_data, columns=updated_headers).astype(object).fillna('')
-                
-                # Recalculate with new data
-                df_item2_clean = df['Item2'].astype('string').str.strip().str.lower()
-                df_note_clean = df['Note'].astype('string').str.strip().str.lower()
-                
-                empty_green_mask = (
-                    (df_item2_clean == 'leasing period') & 
-                    (df_note_clean == 'committed') & 
-                    (df['Factory code'].astype('string').str.strip() == '') &
-                    (df['Tenant code'].astype('string').str.strip() == '') &
-                    (df['Tenant name'].astype('string').str.strip() == '')
-                )
-                empty_green_rows = df[empty_green_mask]
-                print(f"   ✅ Updated empty green rows: {len(empty_green_rows)}")
-        
-        # OPTIMIZATION: Batch fill operations
-        return self._batch_fill_rows(sheet, df, headers, header_row, empty_green_rows, new_summary_rows)
-
-    def _auto_add_green_rows(self, sheet: xw.Sheet, df: pd.DataFrame, headers: List[str], 
-                           header_row: int, total_rows_to_add: int) -> bool:
-        """Add green rows with error handling"""
-        try:
-            # Find existing green rows for reference
-            green_mask = (
-                (df['Item2'].astype('string').str.strip() == 'Leasing period') &
-                (df['Note'].astype('string').str.strip() == 'Committed')
-            )
-            green_indices = df[green_mask].index.tolist()
-            
-            if green_indices:
-                last_green_df_idx = max(green_indices)
-                insertion_excel_row = header_row + 1 + last_green_df_idx
-                
-                added_count = self._add_formatted_green_rows(
-                    sheet, insertion_excel_row, insertion_excel_row, total_rows_to_add, headers
-                )
-                return added_count > 0
-                
-        except Exception as e:
-            print(f"   ⚠️ Could not auto-add green rows: {e}")
-            
-        return False
-
-    def _batch_fill_rows(self, sheet: xw.Sheet, df: pd.DataFrame, headers: List[str],
-                        header_row: int, empty_green_rows: pd.DataFrame, new_summary_rows: List) -> int:
-        """OPTIMIZED: Batch fill rows with minimal Excel COM calls"""
-        
-        if empty_green_rows.empty:
-            print("   ⚠️ No empty green rows available to fill")
-            return 0
-        
-        empty_excel_rows = [header_row + 1 + idx for idx in empty_green_rows.index.tolist()]
-        
-        # OPTIMIZATION: Pre-build all row data before any Excel operations
-        batch_data = []
-        rows_to_process = min(len(empty_excel_rows), len(new_summary_rows))
-        
-        print(f"   ⚡ Preparing {rows_to_process} rows for batch processing...")
-        
-        for i in range(rows_to_process):
-            excel_row = empty_excel_rows[i]
-            summary_idx, srow = new_summary_rows[i]
-            
-            # Get current row for first column preservation
-            current_row_idx = empty_green_rows.index.tolist()[i]
-            current_row = df.iloc[current_row_idx]
-            
-            new_vals = self._build_row_values_optimized(headers, current_row, srow)
-            batch_data.append((excel_row, new_vals))
-        
-        # OPTIMIZATION: Batch write to Excel with error recovery
-        return self._batch_write_to_excel(sheet, batch_data, headers)
 
     def _build_row_values_optimized(self, headers: List[str], current_row: pd.Series, srow: pd.Series) -> List:
         """OPTIMIZED: Build row values with efficient column mapping"""
@@ -1300,7 +1400,13 @@ class EnhancedExcelProcessor:
             return 0
 
     def _add_empty_green_rows(self, sheet: xw.Sheet, start_row: int, count: int, headers: List[str]) -> int:
-        """Legacy method - kept for backward compatibility"""
+        """
+        Legacy method - kept for backward compatibility and testing.
+        
+        NOTE: In the current implementation, 'Add New' rows are collected and exported
+        to a separate output sheet instead of being inserted into individual entities.
+        This method is primarily used for testing and special cases.
+        """
         print(f"   ⚠️ Using legacy row addition method - formatting may not be preserved")
         return self._add_formatted_green_rows(sheet, start_row - 1, start_row - 1, count, headers)
 

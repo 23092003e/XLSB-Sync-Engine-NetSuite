@@ -18,8 +18,13 @@
       "Bash(mkdir:*)",
       "mcp__serena__insert_before_symbol",
       "mcp__serena__think_about_whether_you_are_done",
-      "mcp__serena__find_file"
+      "mcp__serena__find_file",
+      "mcp__serena__find_referencing_symbols"
     ],
-    "deny": []
+    "deny": [],
+    "defaultMode": "acceptEdits",
+    "additionalDirectories": [
+      "C:\\d C:\\Users\\ADMIN\\Desktop"
+    ]
   }
 }
