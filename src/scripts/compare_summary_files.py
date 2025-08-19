@@ -126,6 +126,159 @@ def compare_with_log(summary_old_path: str, summary_new_path: str, log_file_path
     except Exception as e:
         print(f"\n❌ Error: {e}")
 
+def compare_with_document_numbers(summary_old_path: str, summary_new_path: str, log_file_path: str = None):
+    """
+    NEW: Compare files using Document Number-based logic
+    - Uses Document Number as primary key identifier
+    - Highlights newly added Document Numbers (entire rows)
+    - Maps entities using predefined keys
+    """
+    print("=" * 80)
+    print("🔧 DOCUMENT NUMBER-BASED COMPARISON")
+    print("=" * 80)
+    
+    try:
+        # Use SummaryComparator's new Document Number method
+        comparator = SummaryComparator()
+        
+        # Perform Document Number-based comparison
+        success = comparator.process_summary_comparison_with_document_numbers(
+            summary_old_path, summary_new_path, 
+            generate_log=True, log_file_path=log_file_path
+        )
+        
+        if success:
+            print("\n✅ Document Number-based comparison completed successfully!")
+            print("🆕 Newly added Document Numbers highlighted with light yellow background")
+            print("📝 Changes in existing Document Numbers highlighted with light blue background")
+            print("📄 Detailed Document Number-based log has been generated")
+        else:
+            print("\n❌ Document Number-based comparison failed!")
+            
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+
+def compare_document_numbers_only(summary_old_path: str, summary_new_path: str):
+    """
+    NEW: Document Number comparison without log generation
+    """
+    print("=" * 80)
+    print("🔧 DOCUMENT NUMBER COMPARISON (NO LOG)")
+    print("=" * 80)
+    
+    try:
+        # Use SummaryComparator's new Document Number method
+        comparator = SummaryComparator()
+        
+        # Get comparison results
+        comparison_results = comparator.compare_summary_files_by_document_number(summary_old_path, summary_new_path)
+        
+        new_document_numbers = comparison_results['new_document_numbers']
+        entity_mapping = comparison_results['entity_mapping']
+        
+        print(f"\n🔍 Comparison Results:")
+        print(f"   🆕 Newly added Document Numbers: {len(new_document_numbers)}")
+        print(f"   🏢 Entities with new Document Numbers: {len(entity_mapping)}")
+        
+        if new_document_numbers:
+            print(f"\n📋 New Document Number rows: {sorted(new_document_numbers)}")
+        
+        # Apply highlighting
+        if new_document_numbers or comparison_results.get('changed_cells'):
+            success = comparator.apply_document_number_highlighting_to_summary(summary_new_path, comparison_results)
+            if success:
+                print("\n✅ Document Number highlighting applied successfully!")
+            else:
+                print("\n❌ Failed to apply Document Number highlighting!")
+        else:
+            print("\n ℹ️ No new Document Numbers found - no highlighting needed")
+            
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+
+def compare_with_enhanced_logic(summary_old_path: str, summary_new_path: str, log_file_path: str = None):
+    """
+    NEW: Enhanced comparison using oldest matching records
+    - Uses ['Unit name', 'Tenant ID', 'Tenant'] key mapping
+    - Finds oldest record by Date created within each group
+    - For Document Numbers not in old file, compares against oldest matching entity
+    - Light blue highlighting for changed cells
+    - Yellow highlighting for entirely new records
+    """
+    print("=" * 80)
+    print("🔧 ENHANCED COMPARISON (OLDEST MATCHING RECORDS)")
+    print("=" * 80)
+    
+    try:
+        # Use SummaryComparator's new enhanced method
+        comparator = SummaryComparator()
+        
+        # Determine output directory for log
+        output_dir = None
+        if log_file_path:
+            output_dir = os.path.dirname(log_file_path) or os.getcwd()
+        else:
+            output_dir = os.getcwd()
+        
+        # Perform enhanced comparison
+        success = comparator.process_enhanced_summary_comparison(
+            summary_old_path, summary_new_path, output_dir
+        )
+        
+        if success:
+            print("\n✅ Enhanced comparison completed successfully!")
+            print("🔵 Changed cells highlighted with light blue background")
+            print("🟡 Entirely new records highlighted with yellow background")
+            print("📄 Detailed enhanced change log has been generated")
+        else:
+            print("\n❌ Enhanced comparison failed!")
+            
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+
+def compare_enhanced_only(summary_old_path: str, summary_new_path: str):
+    """
+    NEW: Enhanced comparison without log generation
+    """
+    print("=" * 80)
+    print("🔧 ENHANCED COMPARISON (NO LOG)")
+    print("=" * 80)
+    
+    try:
+        # Use SummaryComparator's enhanced method
+        comparator = SummaryComparator()
+        
+        # Get comparison results
+        comparison_results = comparator.compare_summary_files_with_oldest_match(summary_old_path, summary_new_path)
+        
+        changed_rows = comparison_results['changed_rows']
+        new_rows = comparison_results['new_rows']
+        changed_cells = comparison_results['changed_cells']
+        
+        print(f"\n🔍 Comparison Results:")
+        print(f"   🔵 Rows with cell changes: {len(changed_rows)}")
+        print(f"   🟡 Entirely new rows: {len(new_rows)}")
+        print(f"   📊 Total cell changes: {sum(len(cols) for cols in changed_cells.values())}")
+        
+        if changed_rows:
+            print(f"\n📋 Rows with changes: {sorted(changed_rows)}")
+        
+        if new_rows:
+            print(f"\n📋 Entirely new rows: {sorted(new_rows)}")
+        
+        # Apply enhanced highlighting
+        if changed_rows or new_rows:
+            success = comparator.apply_enhanced_highlighting_to_summary(summary_new_path, comparison_results)
+            if success:
+                print("\n✅ Enhanced highlighting applied successfully!")
+            else:
+                print("\n❌ Failed to apply enhanced highlighting!")
+        else:
+            print("\n ℹ️ No changes found - no highlighting needed")
+            
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+
 if __name__ == "__main__":
     # Example usage
     print("Summary File Comparison Tool")
@@ -134,13 +287,21 @@ if __name__ == "__main__":
     if len(sys.argv) < 3:
         print("Usage: python compare_summary_files.py <summary_old_path> <summary_new_path> [mode]")
         print("Modes:")
-        print("  highlight (default) - Compare and highlight changes")
-        print("  log                 - Generate detailed log only")
-        print("  both               - Compare, highlight, and generate log")
+        print("  highlight (default) - Compare and highlight changes (legacy logic)")
+        print("  log                 - Generate detailed log only (legacy logic)")
+        print("  both               - Compare, highlight, and generate log (legacy logic)")
+        print("  document-number     - NEW: Document Number-based comparison with log")
+        print("  document-only       - NEW: Document Number-based comparison without log")
+        print("  enhanced            - NEW: Enhanced comparison with oldest matching records and log")
+        print("  enhanced-only       - NEW: Enhanced comparison with oldest matching records without log")
         print("Examples:")
         print("python compare_summary_files.py 'IPA PLC Annex T7.xlsx' 'IPA PLC Annex T8.xlsx'")
         print("python compare_summary_files.py 'Summary_Jan.xlsx' 'Summary_Feb.xlsx' log")
         print("python compare_summary_files.py 'Previous.xlsx' 'Current.xlsx' both")
+        print("python compare_summary_files.py 'Previous.xlsx' 'Current.xlsx' document-number  # NEW")
+        print("python compare_summary_files.py 'Previous.xlsx' 'Current.xlsx' document-only    # NEW")
+        print("python compare_summary_files.py 'Previous.xlsx' 'Current.xlsx' enhanced        # NEW")
+        print("python compare_summary_files.py 'Previous.xlsx' 'Current.xlsx' enhanced-only   # NEW")
         sys.exit(1)
     
     summary_old_file = sys.argv[1]
@@ -157,8 +318,9 @@ if __name__ == "__main__":
         sys.exit(1)
     
     # Validate mode
-    if mode not in ["highlight", "log", "both"]:
-        print(f"Invalid mode: {mode}. Use 'highlight', 'log', or 'both'")
+    valid_modes = ["highlight", "log", "both", "document-number", "document-only", "enhanced", "enhanced-only"]
+    if mode not in valid_modes:
+        print(f"Invalid mode: {mode}. Use one of: {', '.join(valid_modes)}")
         sys.exit(1)
     
     print(f"Previous: {summary_old_file}")
@@ -168,15 +330,27 @@ if __name__ == "__main__":
     
     # Run based on mode
     if mode == "highlight":
-        # Default: Compare and highlight only (no log)
+        # Default: Compare and highlight only (no log) - Legacy logic
         processor = EnhancedExcelProcessor(DEFAULT_CONFIG)
         processor.compare_and_highlight_summary_files(
             summary_old_file, summary_new_file, 
             generate_log=False
         )
     elif mode == "log":
-        # Generate detailed log only
+        # Generate detailed log only - Legacy logic
         generate_change_log_only(summary_old_file, summary_new_file)
     elif mode == "both":
-        # Complete comparison with highlighting and logging
+        # Complete comparison with highlighting and logging - Legacy logic
         compare_with_log(summary_old_file, summary_new_file)
+    elif mode == "document-number":
+        # NEW: Document Number-based comparison with log
+        compare_with_document_numbers(summary_old_file, summary_new_file)
+    elif mode == "document-only":
+        # NEW: Document Number-based comparison without log
+        compare_document_numbers_only(summary_old_file, summary_new_file)
+    elif mode == "enhanced":
+        # NEW: Enhanced comparison with oldest matching records and log
+        compare_with_enhanced_logic(summary_old_file, summary_new_file)
+    elif mode == "enhanced-only":
+        # NEW: Enhanced comparison with oldest matching records without log
+        compare_enhanced_only(summary_old_file, summary_new_file)
