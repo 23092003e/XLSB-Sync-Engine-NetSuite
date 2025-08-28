@@ -775,7 +775,7 @@ class SummaryComparator:
                                     if col_name.lower().strip() in header_col.lower().strip() or \
                                        header_col.lower().strip() in col_name.lower().strip():
                                         col_num = header_col_num
-                                        break
+                                        break # Note
                             
                             if col_num:
                                 # Highlight the specific cell with light blue background
@@ -1354,3 +1354,196 @@ class SummaryComparator:
         except Exception as e:
             print(f"   Error generating enhanced change log: {e}")
             return False
+    
+    def compare_summary_files_by_document_item_key(self, summary_old_path: str, summary_new_path: str) -> Dict[str, any]:
+        """
+        NEW LOGIC: Compare summary files using Document Number + Item as composite key
+        
+        This is the most accurate logic for identifying:
+        - NEW ROWS: Document Number + Item combinations that don't exist in old file
+        - UPDATE ROWS: Document Number + Item combinations that exist but have changes in tracked columns
+        
+        Args:
+            summary_old_path: Path to previous period Summary file
+            summary_new_path: Path to current period Summary file
+        
+        Returns:
+            Dict with:
+            - 'new_rows_indices': list of DataFrame indices for completely new combinations
+            - 'update_rows_indices': list of DataFrame indices for existing combinations with changes
+            - 'unchanged_rows_indices': list of DataFrame indices for unchanged combinations
+        """
+        print(f"Comparing Summary files using Document Number + Item key:")
+        print(f"   Previous: {summary_old_path}")
+        print(f"   Current:  {summary_new_path}")
+        
+        # Load both files
+        old_df = self.load_summary_file(summary_old_path)
+        new_df = self.load_summary_file(summary_new_path)
+        
+        print(f"   Previous rows: {len(old_df)}, Current rows: {len(new_df)}")
+        
+        # Column mapping between new and old files (based on analysis)
+        column_mapping = {
+            'GLA': 'GLA',
+            'Start date (for model)': 'Start date (for model)',
+            'End date (for model)': 'End date (for model)', 
+            'Rent (VND)_Item': 'Rent VND_Item (for model)',
+            'Rent (USD)_Item': 'Rent USD_Item (for model)', 
+            'Escalation rate': 'Escalation rate (for model)',
+            'Service charge': 'Service charge (for model)',
+        }
+        
+        # Create Document Number + Item key for old file lookup
+        old_lookup = {}
+        for idx, row in old_df.iterrows():
+            doc_num = str(row.get('Document Number', '')).strip()
+            item = str(row.get('Item', '')).strip()
+            
+            if doc_num and item and doc_num != 'nan' and item != 'nan':
+                key = f"{doc_num}|{item}"
+                old_lookup[key] = row
+        
+        print(f"   Created old lookup with {len(old_lookup)} Document Number + Item combinations")
+        
+        # Analyze each row in new file
+        new_rows_indices = []
+        update_rows_indices = []
+        unchanged_rows_indices = []
+        
+        for idx, new_row in new_df.iterrows():
+            doc_num = str(new_row.get('Document Number', '')).strip()
+            item = str(new_row.get('Item', '')).strip()
+            
+            if not doc_num or not item or doc_num == 'nan' or item == 'nan':
+                continue
+            
+            key = f"{doc_num}|{item}"
+            
+            if key in old_lookup:
+                # Existing combination - check for changes
+                old_row = old_lookup[key]
+                has_changes = False
+                
+                for new_col, old_col in column_mapping.items():
+                    if new_col in new_df.columns and old_col in old_df.columns:
+                        new_val = self._normalize_value(new_row.get(new_col), new_col)
+                        old_val = self._normalize_value(old_row.get(old_col), old_col)
+                        
+                        if new_val != old_val:
+                            has_changes = True
+                            break
+                
+                if has_changes:
+                    update_rows_indices.append(idx)
+                else:
+                    unchanged_rows_indices.append(idx)
+            else:
+                # New combination
+                new_rows_indices.append(idx)
+        
+        print(f"   NEW Document Number + Item combinations: {len(new_rows_indices)}")
+        print(f"   UPDATED existing combinations: {len(update_rows_indices)}")
+        print(f"   UNCHANGED combinations: {len(unchanged_rows_indices)}")
+        
+        return {
+            'new_rows_indices': new_rows_indices,
+            'update_rows_indices': update_rows_indices,
+            'unchanged_rows_indices': unchanged_rows_indices
+        }
+    
+    def generate_excel_output_files(self, summary_old_path: str, summary_new_path: str, 
+                                   output_file_path: str = None, use_document_item_key: bool = True) -> str:
+        """
+        Generate Excel output file with 'new_rows' and 'update_rows' sheets
+        
+        Args:
+            summary_old_path: Path to previous period Summary file
+            summary_new_path: Path to current period Summary file
+            output_file_path: Optional output file path. If None, auto-generates based on input files
+            use_document_item_key: Use Document Number + Item key comparison (NEW RECOMMENDED)
+        
+        Returns:
+            Path to the generated Excel file
+        """
+        from datetime import datetime
+        
+        # Auto-generate output file path if not provided
+        if output_file_path is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            old_name = os.path.splitext(os.path.basename(summary_old_path))[0]
+            new_name = os.path.splitext(os.path.basename(summary_new_path))[0]
+            output_file_path = f"comparison_output_{old_name}_vs_{new_name}_{timestamp}.xlsx"
+        
+        print(f"Generating Excel output file: {output_file_path}")
+        
+        try:
+            # Load both files
+            old_df = self.load_summary_file(summary_old_path)
+            new_df = self.load_summary_file(summary_new_path)
+            
+            # Use the NEW Document Number + Item key logic
+            if use_document_item_key:
+                print("   Using NEW Document Number + Item key comparison logic")
+                comparison_results = self.compare_summary_files_by_document_item_key(summary_old_path, summary_new_path)
+                new_rows_indices = comparison_results['new_rows_indices']
+                update_rows_indices = comparison_results['update_rows_indices']
+            else:
+                # Fallback to old logic
+                print("   Using legacy Document Number-only comparison logic")
+                comparison_results = self.compare_summary_files_by_document_number(summary_old_path, summary_new_path)
+                new_document_numbers = comparison_results['new_document_numbers']
+                changed_cells = comparison_results['changed_cells']
+                
+                # Convert to indices
+                new_rows_indices = [row_num - 2 for row_num in new_document_numbers if row_num - 2 >= 0 and row_num - 2 < len(new_df)]
+                update_rows_indices = [row_num - 2 for row_num, changed_columns in changed_cells.items() 
+                                     if row_num not in new_document_numbers and row_num - 2 >= 0 and row_num - 2 < len(new_df)]
+            
+            # Create new_rows and update_rows DataFrames
+            new_rows_df = new_df.iloc[new_rows_indices] if new_rows_indices else pd.DataFrame(columns=new_df.columns)
+            update_rows_df = new_df.iloc[update_rows_indices] if update_rows_indices else pd.DataFrame(columns=new_df.columns)
+            
+            print(f"   New rows: {len(new_rows_df)}")
+            print(f"   Update rows: {len(update_rows_df)}")
+            
+            # Create Excel file with multiple sheets
+            with pd.ExcelWriter(output_file_path, engine='openpyxl') as writer:
+                # Write new_rows sheet
+                new_rows_df.to_excel(writer, sheet_name='new_rows', index=False)
+                
+                # Write update_rows sheet
+                update_rows_df.to_excel(writer, sheet_name='update_rows', index=False)
+                
+                # Add a summary sheet with detailed info
+                summary_data = {
+                    'Metric': [
+                        'Total Rows in Previous File',
+                        'Total Rows in Current File',
+                        'New Rows (Document Number + Item not in old)',
+                        'Updated Rows (existing combinations with changes)',
+                        'Unchanged Rows',
+                        'Comparison Method',
+                        'Key Used',
+                        'Generated At'
+                    ],
+                    'Value': [
+                        len(old_df),
+                        len(new_df),
+                        len(new_rows_df),
+                        len(update_rows_df),
+                        len(new_df) - len(new_rows_df) - len(update_rows_df),
+                        'Document Number + Item Key' if use_document_item_key else 'Document Number Only',
+                        'Document Number + Item' if use_document_item_key else 'Document Number',
+                        datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    ]
+                }
+                summary_df = pd.DataFrame(summary_data)
+                summary_df.to_excel(writer, sheet_name='summary', index=False)
+            
+            print(f"   Excel output file generated: {output_file_path}")
+            return output_file_path
+            
+        except Exception as e:
+            print(f"   Error generating Excel output file: {e}")
+            raise
