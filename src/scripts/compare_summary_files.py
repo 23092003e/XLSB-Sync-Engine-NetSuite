@@ -327,23 +327,47 @@ def generate_output_files_with_highlighting(summary_old_path: str, summary_new_p
         
         print(f"Excel output files generated: {output_path}")
         
-        # Then apply highlighting based on logic used
-        if use_document_number_logic:
-            print("Applying Document Number-based highlighting...")
-            comparison_results = comparator.compare_summary_files_by_document_number(summary_old_path, summary_new_path)
-            success = comparator.apply_document_number_highlighting_to_summary(summary_new_path, comparison_results)
-        else:
-            print("Applying Enhanced highlighting...")
-            comparison_results = comparator.compare_summary_files_with_oldest_match(summary_old_path, summary_new_path)
-            success = comparator.apply_enhanced_highlighting_to_summary(summary_new_path, comparison_results)
+        # Apply NEW highlighting logic with 90-day rule
+        print("Applying highlighting with 90-day rule...")
+        print("   - YELLOW rows: New Document Number + Item combinations (within 90 days)")  
+        print("   - BLUE cells: Updated cells in existing combinations")
+        
+        success = comparator.apply_highlighting_to_summary_with_90_day_rule(summary_old_path, summary_new_path)
         
         if success:
             print("Highlighting applied to original file successfully!")
             print(f"\nComplete process finished!")
-            print(f"   Output file with sheets: {output_path}")
-            print(f"   Original file highlighted: {summary_new_path}")
+            print(f"   Output file with entity format: {output_path}")
+            print(f"   Summary file highlighted: {summary_new_path}")
         else:
             print("Output files generated but highlighting failed")
+        
+    except Exception as e:
+        print(f"\nError: {e}")
+
+def apply_highlighting_only(summary_old_path: str, summary_new_path: str):
+    """
+    NEW: Apply highlighting only to summary file (no output files)
+    """
+    print("=" * 80)
+    print("APPLY HIGHLIGHTING TO SUMMARY FILE")
+    print("=" * 80)
+    
+    try:
+        # Use SummaryComparator
+        comparator = SummaryComparator()
+        
+        print("Applying highlighting with 90-day rule...")
+        print("   - YELLOW rows: New Document Number + Item combinations (within 90 days)")  
+        print("   - BLUE cells: Updated cells in existing combinations")
+        
+        success = comparator.apply_highlighting_to_summary_with_90_day_rule(summary_old_path, summary_new_path)
+        
+        if success:
+            print("Highlighting applied successfully!")
+            print(f"   Summary file highlighted: {summary_new_path}")
+        else:
+            print("Highlighting failed!")
         
     except Exception as e:
         print(f"\nError: {e}")
@@ -365,6 +389,7 @@ if __name__ == "__main__":
         print("  enhanced-only       - NEW: Enhanced comparison with oldest matching records without log")
         print("  output-files        - NEW: Generate Excel output with new_rows & update_rows sheets")
         print("  output-with-highlight - NEW: Generate output files + apply highlighting")
+        print("  highlight-only      - NEW: Apply highlighting to summary file only (90-day rule)")
         print("Examples:")
         print("python compare_summary_files.py 'IPA PLC Annex T7.xlsx' 'IPA PLC Annex T8.xlsx'")
         print("python compare_summary_files.py 'Summary_Jan.xlsx' 'Summary_Feb.xlsx' log")
@@ -375,6 +400,7 @@ if __name__ == "__main__":
         print("python compare_summary_files.py 'Previous.xlsx' 'Current.xlsx' enhanced-only   # NEW")
         print("python compare_summary_files.py 'Previous.xlsx' 'Current.xlsx' output-files    # NEW - Creates Excel with sheets")
         print("python compare_summary_files.py 'Previous.xlsx' 'Current.xlsx' output-with-highlight # NEW - Output + Highlighting")
+        print("python compare_summary_files.py 'Previous.xlsx' 'Current.xlsx' highlight-only  # NEW - Highlight summary only")
         sys.exit(1)
     
     summary_old_file = sys.argv[1]
@@ -383,15 +409,15 @@ if __name__ == "__main__":
     
     # Validate files exist
     if not os.path.exists(summary_old_file):
-        print(f"❌ Previous file not found: {summary_old_file}")
+        print(f"Error: Previous file not found: {summary_old_file}")
         sys.exit(1)
     
     if not os.path.exists(summary_new_file):
-        print(f"❌ Current file not found: {summary_new_file}")
+        print(f"Error: Current file not found: {summary_new_file}")
         sys.exit(1)
     
     # Validate mode
-    valid_modes = ["highlight", "log", "both", "document-number", "document-only", "enhanced", "enhanced-only", "output-files", "output-with-highlight"]
+    valid_modes = ["highlight", "log", "both", "document-number", "document-only", "enhanced", "enhanced-only", "output-files", "output-with-highlight", "highlight-only"]
     if mode not in valid_modes:
         print(f"Invalid mode: {mode}. Use one of: {', '.join(valid_modes)}")
         sys.exit(1)
@@ -433,3 +459,6 @@ if __name__ == "__main__":
     elif mode == "output-with-highlight":
         # NEW: Generate output files and apply highlighting
         generate_output_files_with_highlighting(summary_old_file, summary_new_file)
+    elif mode == "highlight-only":
+        # NEW: Apply highlighting only to summary file
+        apply_highlighting_only(summary_old_file, summary_new_file)

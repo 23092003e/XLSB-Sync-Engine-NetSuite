@@ -1,8 +1,8 @@
 # excel_processor/summary_comparator.py
 import pandas as pd
 import xlwings as xw
-from typing import Dict, List, Tuple, Set
-from datetime import datetime
+from typing import Dict, List, Tuple, Set, Optional
+from datetime import datetime, timedelta
 import os
 
 class SummaryComparator:
@@ -1355,17 +1355,347 @@ class SummaryComparator:
             print(f"   Error generating enhanced change log: {e}")
             return False
     
-    def compare_summary_files_by_document_item_key(self, summary_old_path: str, summary_new_path: str) -> Dict[str, any]:
+    def _is_within_90_days(self, date_str: str) -> bool:
+        """Check if the given date is 90 days before today or any day after today"""
+        parsed_date = self._parse_date_flexible(date_str)
+        if parsed_date is None:
+            return False
+
+        today = datetime.now()
+        lower_bound = today - timedelta(days=90)
+
+        return parsed_date >= lower_bound
+        
+    def _parse_date_flexible(self, date_str: str) -> Optional[datetime]:
+        """Parse date from multiple formats commonly found in Excel"""
+        if not date_str or pd.isna(date_str):
+            return None
+            
+        date_str = str(date_str).strip()
+        if not date_str or date_str.lower() in ['', 'nan', 'none', 'null']:
+            return None
+        
+        # For summary data, prioritize mm/dd/yyyy format but also support other common formats
+        date_formats = [
+            "%m/%d/%Y",              # mm/dd/yyyy (US format: month/day/year) - PRIORITY for summary
+            "%m/%d/%y",              # mm/dd/yy (US format with 2-digit year)
+            "%Y-%m-%d %H:%M:%S",     # 2022-10-30 00:00:00 (datetime format from summary)
+            "%Y-%m-%d",              # 2022-10-30 (ISO date format)
+            "%d-%b-%y",              # 8-Mar-24
+            "%d-%B-%y",              # 8-March-24
+            "%d-%b-%Y",              # 8-Mar-2024
+            "%d-%B-%Y",              # 8-March-2024
+            "%Y/%m/%d",              # 2023/03/08
+        ]
+        
+        # Try each format in order - mm/dd/yyyy will be tried first
+        for fmt in date_formats:
+            try:
+                return datetime.strptime(date_str, fmt)
+            except ValueError:
+                continue
+        
+        try:
+            # Force US locale interpretation for mm/dd/yyyy
+            parsed = pd.to_datetime(date_str, errors='coerce')
+            if pd.notna(parsed):
+               return parsed.to_pydatetime()
+        except:
+            pass
+        
+        # Handle Excel serial dates
+        try:
+            float_val = float(date_str)
+            if 1 <= float_val <= 100000:
+                base_date = datetime(1899, 12, 30)
+                return base_date + timedelta(days=float_val)
+        except:
+            pass
+        
+        return None
+
+    def _get_entity_column_mapping(self, summary_headers: List[str]) -> Dict[str, str]:
+        """
+        Map summary columns to entity model column positions.
+        Starting from "Leasing period" column (Item2) instead of column 1.
+        
+        Returns:
+            Dictionary mapping entity columns to summary columns
+        """
+        # Entity model columns starting from "Leasing period" position (column 5 onwards)
+        entity_columns = [
+            'Item2',                     # 5  - Always "Leasing period" (START HERE)
+            'Note',                      # 6  - Always "Committed"
+            'Region',                    # 7  - From summary
+            'Product type',              # 8  - From summary
+            'Factory code',              # 9  - From summary (Unit name)
+            'Tenant code',               # 10 - From summary (Tenant ID)
+            'Tenant name',               # 11 - From summary (Tenant)
+            'Existing/New/Exp/Renew',    # 12 - Fixed as "New"
+            'Tenant Industry',           # 13 - From summary (Industry)
+            'Desk',                      # 14 - Empty
+            'Broker',                    # 15 - Empty
+            'GLA',                       # 16 - From summary
+            'Rent',                      # 17 - From summary (VND)
+            'EX rate',                   # 18 - Empty
+            'Rent',                      # 19 - From summary (USD) 
+            'Deposit',                   # 20 - From summary
+            'Growth rate (Act)',         # 21 - From summary (Escalation rate)
+            'IPA date',                  # 22 - Empty
+            'PLC date',                  # 23 - Empty
+            'Handover',                  # 24 - Fixed as "N"
+            'Start date',                # 25 - From summary
+            'End date',                  # 26 - From summary
+            'Term',                      # 27 - From summary
+            'Payment term',              # 28 - From summary
+            'Fitting out',               # 29 - From summary (Fitout & rent-free)
+            'Rent free',                 # 30 - Empty
+            'Service charge',            # 31 - From summary
+            'Commission',                # 32 - From summary (Commission fee)
+            'Frequently'                 # 33 - Empty (END HERE)
+        ]
+        
+        # Map to available summary columns
+        column_mapping = {}
+        
+        # Fixed values for entity model
+        fixed_values = {
+            'Item2': 'Leasing period',                        # Fixed value (STARTING COLUMN)
+            'Note': 'Committed',                              # Fixed value  
+            'Existing/New/Exp/Renew': 'New',                  # Fixed as "New"
+            'Desk': '',                                       # Empty
+            'Broker': '',                                     # Empty
+            'EX rate': '',                                    # Empty
+            'IPA date': '',                                   # Empty
+            'PLC date': '',                                   # Empty
+            'Handover': 'N',                                  # Fixed as "N"
+            'Rent free': '',                                  # Empty
+            'Frequently': ''                                  # Empty (ENDING COLUMN)
+        }
+        
+        # Map summary columns to entity columns
+        summary_to_entity = {
+            # Map summary columns to entity positions (starting from Item2)
+            'Region': 'Region',                              # 7
+            'Product Type': 'Product type',                  # 8
+            'Unit name': 'Factory code',                     # 9
+            'Tenant ID': 'Tenant code',                      # 10
+            'Tenant': 'Tenant name',                         # 11
+            'Industry': 'Tenant Industry',                   # 13
+            'GLA': 'GLA',                                    # 16
+            'Rent (VND)_Item': 'Rent',                       # 17 (VND)
+            'Rent (USD)_Item': 'Rent',                       # 19 (USD) - will be handled specially
+            'Deposit': 'Deposit',                            # 20
+            'Escalation rate': 'Growth rate (Act)',          # 21
+            'Start date (for model)': 'Start date',          # 25
+            'End date (for model)': 'End date',              # 26
+            'Term': 'Term',                                  # 27
+            'Payment term': 'Payment term',                  # 28
+            'Fitout & rent-free (months)': 'Fitting out',    # 29
+            'Service charge': 'Service charge',              # 31
+            'Commission fee': 'Commission'                   # 32
+        }
+        
+        # Add fixed values
+        for entity_col, fixed_val in fixed_values.items():
+            column_mapping[entity_col] = fixed_val
+        
+        # Add mapped columns
+        for summary_col, entity_col in summary_to_entity.items():
+            if summary_col in summary_headers:
+                column_mapping[entity_col] = summary_col
+        
+        # Handle special case for Rent USD (column 19)
+        if 'Rent (USD)_Item' in summary_headers:
+            column_mapping['Rent_USD'] = 'Rent (USD)_Item'  # Special key for USD rent
+        
+        return column_mapping, entity_columns
+
+    def _format_row_for_entity_model(self, row_data: pd.Series, headers: List[str]) -> List:
+        """
+        Format row data for output sheet using entity model structure.
+        Creates columns starting from "Leasing period" column only.
+        
+        Args:
+            row_data: Pandas Series containing row data
+            headers: Column headers from summary
+            
+        Returns:
+            Formatted row data as list starting from "Leasing period" column
+        """
+        column_mapping, entity_columns = self._get_entity_column_mapping(headers)
+        formatted_row = []
+        
+        for i, entity_col in enumerate(entity_columns):
+            if entity_col in column_mapping:
+                mapped_value = column_mapping[entity_col]
+                
+                # Handle fixed values
+                if mapped_value in ['Leasing period', 'Committed', 'New', 'N', '']:
+                    formatted_row.append(mapped_value)
+                    
+                # Handle special case for Rent USD (column 19 in original, now adjusted index)
+                elif entity_col == 'Rent' and 'Rent (USD)_Item' in entity_col:
+                    if 'Rent_USD' in column_mapping:
+                        usd_col = column_mapping['Rent_USD']  
+                        if usd_col in headers:
+                            value = row_data.get(usd_col, '')
+                            formatted_row.append(self._format_numeric_value(value))
+                        else:
+                            formatted_row.append('')
+                    else:
+                        formatted_row.append('')
+                
+                # Handle dynamic values from row data
+                elif mapped_value in headers:
+                    value = row_data.get(mapped_value, '')
+                    
+                    # Format dates to MM/DD/YYYY
+                    if 'date' in entity_col.lower() and value and str(value).strip():
+                        parsed_date = self._parse_date_flexible(str(value))
+                        if parsed_date:
+                            formatted_row.append(parsed_date.strftime('%m/%d/%Y'))
+                        else:
+                            formatted_row.append(str(value))
+                    
+                    # Format numeric columns
+                    elif entity_col in ['GLA', 'Rent', 'Deposit', 'Growth rate (Act)', 'Term', 'Payment term', 
+                                       'Fitting out', 'Service charge', 'Commission']:
+                        formatted_row.append(self._format_numeric_value(value))
+                    
+                    # Default: convert to string
+                    else:
+                        formatted_row.append(str(value) if pd.notna(value) and str(value).strip() != '' else '')
+                else:
+                    formatted_row.append('')
+            else:
+                # Column not mapped, add empty
+                formatted_row.append('')
+        
+        return formatted_row  # Limit to exactly 33 columns
+    
+    def _format_numeric_value(self, value) -> str:
+        """Helper method to format numeric values consistently"""
+        if value and str(value).strip():
+            try:
+                val_str = str(value).replace(',', '').strip()
+                if val_str and val_str != '' and val_str.lower() != 'nan':
+                    val_float = float(val_str)
+                    if val_float.is_integer():
+                        return str(int(val_float))
+                    else:
+                        return str(val_float)
+            except (ValueError, TypeError):
+                pass
+        return ''
+    
+    def apply_highlighting_to_summary_with_90_day_rule(self, summary_old_path: str, summary_new_path: str) -> bool:
+        """
+        Apply highlighting directly to the summary new file:
+        - YELLOW rows: NEW Document Number + Item combinations (within 90 days)
+        - BLUE cells: UPDATE cells in existing combinations
+        - Respects 90-day filtering rule
+        
+        Args:
+            summary_new_path: Path to the summary new file to highlight
+            
+        Returns:
+            True if highlighting was successful, False otherwise
+        """
+        print(f"Applying highlighting to summary file: {summary_new_path}")
+        
+        try:
+            # First get comparison results with 90-day rule
+            comparison_results = self.compare_summary_files_by_document_item_key(
+                summary_old_path,
+                summary_new_path,
+                apply_90_day_filter=True
+            )
+            
+            new_rows_indices = comparison_results['new_rows_indices']
+            changed_cells = comparison_results['changed_cells']
+            
+            if not new_rows_indices and not changed_cells:
+                print("   No changes found - no highlighting needed")
+                return True
+            
+            # Open Excel file with xlwings for highlighting
+            import xlwings as xw
+            
+            app = xw.App(visible=False, add_book=False)
+            try:
+                wb = app.books.open(summary_new_path)
+                sheet = wb.sheets[0]  # Assume first sheet
+                
+                print(f"   Highlighting {len(new_rows_indices)} new rows (yellow)")
+                print(f"   Highlighting {len(changed_cells)} rows with cell changes (blue cells)")
+                
+                # Get total columns for full row highlighting
+                last_col = sheet.used_range.last_cell.column
+                
+                # Apply yellow highlighting to new rows (full rows)
+                for df_idx in new_rows_indices:
+                    excel_row = df_idx + 2  # Convert pandas index to Excel row (+2 for header)
+                    try:
+                        row_range = sheet.range((excel_row, 1), (excel_row, last_col))
+                        row_range.color = (255, 255, 0)  # Yellow for new rows
+                    except Exception as e:
+                        print(f"   Warning: Could not highlight row {excel_row}: {e}")
+                
+                # Load summary file once for column mapping
+                summary_df = self.load_summary_file(summary_new_path)
+                headers = list(summary_df.columns)
+                
+                # Apply blue highlighting to changed cells
+                for excel_row, changed_columns in changed_cells.items():
+                    try:
+                        for col_name in changed_columns:
+                            if col_name in headers:
+                                col_idx = headers.index(col_name) + 1  # +1 for Excel 1-based indexing
+                                cell_range = sheet.range((excel_row, col_idx))
+                                cell_range.color = (173, 216, 230)  # Light blue for changed cells
+                    except Exception as e:
+                        print(f"   Warning: Could not highlight cells in row {excel_row}: {e}")
+                
+                # Save and close
+                wb.save()
+                wb.close()
+                
+                print("   Highlighting applied successfully!")
+                return True
+                
+            except Exception as e:
+                print(f"   Error during highlighting: {e}")
+                if 'wb' in locals():
+                    try:
+                        wb.close()
+                    except:
+                        pass
+                return False
+                
+            finally:
+                try:
+                    app.quit()
+                except:
+                    pass
+                    
+        except Exception as e:
+            print(f"   Error applying highlighting: {e}")
+            return False
+
+    def compare_summary_files_by_document_item_key(self, summary_old_path: str, summary_new_path: str, 
+                                                  apply_90_day_filter: bool = True) -> Dict[str, any]:
         """
         NEW LOGIC: Compare summary files using Document Number + Item as composite key
         
         This is the most accurate logic for identifying:
-        - NEW ROWS: Document Number + Item combinations that don't exist in old file
+        - NEW ROWS: Document Number + Item combinations that don't exist in old file (within 90-day rule)
         - UPDATE ROWS: Document Number + Item combinations that exist but have changes in tracked columns
         
         Args:
             summary_old_path: Path to previous period Summary file
             summary_new_path: Path to current period Summary file
+            apply_90_day_filter: Apply 90-day filtering rule on new rows (default True)
         
         Returns:
             Dict with:
@@ -1406,10 +1736,28 @@ class SummaryComparator:
         
         print(f"   Created old lookup with {len(old_lookup)} Document Number + Item combinations")
         
+        # Find Start date column for 90-day filtering
+        start_date_col = None
+        if apply_90_day_filter:
+            for col in new_df.columns:
+                col_lower = col.lower().strip()
+                if any(keyword in col_lower for keyword in ['start']):
+                    if any(keyword in col_lower for keyword in ['date']):
+                        start_date_col = col
+                        break
+            
+            if start_date_col:
+                print(f"   Using '{start_date_col}' column for 90-day filtering")
+            else:
+                print("   No Start date column found - skipping 90-day filter")
+                apply_90_day_filter = False
+        
         # Analyze each row in new file
         new_rows_indices = []
         update_rows_indices = []
         unchanged_rows_indices = []
+        filtered_out_count = 0
+        changed_cells_details = {}  # Track changed cells for highlighting
         
         for idx, new_row in new_df.iterrows():
             doc_num = str(new_row.get('Document Number', '')).strip()
@@ -1424,6 +1772,7 @@ class SummaryComparator:
                 # Existing combination - check for changes
                 old_row = old_lookup[key]
                 has_changes = False
+                changed_columns = []
                 
                 for new_col, old_col in column_mapping.items():
                     if new_col in new_df.columns and old_col in old_df.columns:
@@ -1432,24 +1781,38 @@ class SummaryComparator:
                         
                         if new_val != old_val:
                             has_changes = True
-                            break
+                            changed_columns.append(new_col)
                 
                 if has_changes:
                     update_rows_indices.append(idx)
+                    # Track changed cells for highlighting (convert idx to Excel row number)
+                    excel_row = idx + 2  # +2 because pandas is 0-indexed, Excel starts at 1, and has header
+                    changed_cells_details[excel_row] = changed_columns
                 else:
                     unchanged_rows_indices.append(idx)
             else:
-                # New combination
-                new_rows_indices.append(idx)
+                # New combination - apply 90-day filter if enabled
+                if apply_90_day_filter and start_date_col:
+                    start_date_val = new_row.get(start_date_col)
+                    if self._is_within_90_days(str(start_date_val)):
+                        new_rows_indices.append(idx)
+                    else:
+                        filtered_out_count += 1
+                else:
+                    # No 90-day filter or no start date column
+                    new_rows_indices.append(idx)
         
         print(f"   NEW Document Number + Item combinations: {len(new_rows_indices)}")
         print(f"   UPDATED existing combinations: {len(update_rows_indices)}")
         print(f"   UNCHANGED combinations: {len(unchanged_rows_indices)}")
+        if apply_90_day_filter and filtered_out_count > 0:
+            print(f"   Filtered out by 90-day rule: {filtered_out_count}")
         
         return {
             'new_rows_indices': new_rows_indices,
             'update_rows_indices': update_rows_indices,
-            'unchanged_rows_indices': unchanged_rows_indices
+            'unchanged_rows_indices': unchanged_rows_indices,
+            'changed_cells': changed_cells_details
         }
     
     def generate_excel_output_files(self, summary_old_path: str, summary_new_path: str, 
@@ -1500,19 +1863,36 @@ class SummaryComparator:
                 update_rows_indices = [row_num - 2 for row_num, changed_columns in changed_cells.items() 
                                      if row_num not in new_document_numbers and row_num - 2 >= 0 and row_num - 2 < len(new_df)]
             
-            # Create new_rows and update_rows DataFrames
+            # Create new_rows and update_rows DataFrames with entity model formatting
             new_rows_df = new_df.iloc[new_rows_indices] if new_rows_indices else pd.DataFrame(columns=new_df.columns)
             update_rows_df = new_df.iloc[update_rows_indices] if update_rows_indices else pd.DataFrame(columns=new_df.columns)
             
             print(f"   New rows: {len(new_rows_df)}")
             print(f"   Update rows: {len(update_rows_df)}")
             
+            # Apply entity model formatting to new_rows (similar to entity processing)
+            if not new_rows_df.empty:
+                print("   Applying entity model formatting to new rows...")
+                summary_headers = list(new_rows_df.columns)
+                
+                # Get entity column mapping and order
+                column_mapping, entity_columns = self._get_entity_column_mapping(summary_headers)
+                
+                formatted_new_rows = []
+                for idx, row in new_rows_df.iterrows():
+                    formatted_row = self._format_row_for_entity_model(row, summary_headers)
+                    formatted_new_rows.append(formatted_row)
+                
+                # Convert to DataFrame with entity column order for easy copy-paste
+                new_rows_df = pd.DataFrame(formatted_new_rows, columns=entity_columns)
+                print(f"   Formatted {len(new_rows_df)} new rows with entity model structure")
+            
             # Create Excel file with multiple sheets
             with pd.ExcelWriter(output_file_path, engine='openpyxl') as writer:
-                # Write new_rows sheet
+                # Write new_rows sheet with entity model formatting
                 new_rows_df.to_excel(writer, sheet_name='new_rows', index=False)
                 
-                # Write update_rows sheet
+                # Write update_rows sheet (standard formatting)
                 update_rows_df.to_excel(writer, sheet_name='update_rows', index=False)
                 
                 # Add a summary sheet with detailed info
@@ -1520,11 +1900,13 @@ class SummaryComparator:
                     'Metric': [
                         'Total Rows in Previous File',
                         'Total Rows in Current File',
-                        'New Rows (Document Number + Item not in old)',
+                        'New Rows (Document Number + Item not in old, within 90 days)',
                         'Updated Rows (existing combinations with changes)',
                         'Unchanged Rows',
                         'Comparison Method',
                         'Key Used',
+                        '90-Day Filter Applied',
+                        'New Rows Format',
                         'Generated At'
                     ],
                     'Value': [
@@ -1533,8 +1915,10 @@ class SummaryComparator:
                         len(new_rows_df),
                         len(update_rows_df),
                         len(new_df) - len(new_rows_df) - len(update_rows_df),
-                        'Document Number + Item Key' if use_document_item_key else 'Document Number Only',
+                        'Document Number + Item Key with 90-day filter' if use_document_item_key else 'Document Number Only',
                         'Document Number + Item' if use_document_item_key else 'Document Number',
+                        'Yes (+-90 days from today)' if use_document_item_key else 'No',
+                        'Entity Model Formatting Applied' if use_document_item_key else 'Standard',
                         datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     ]
                 }
