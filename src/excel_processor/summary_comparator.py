@@ -277,6 +277,182 @@ class SummaryComparator:
                 key_parts.append('')
         return '|'.join(key_parts)
     
+    def get_latest_record_by_date_created(self, records: List[pd.Series], date_created_col: str = 'Date created') -> pd.Series:
+        """
+        Get record with latest date_created from a list of records with same entity key.
+        This handles the requirement: for duplicate items, use the one with latest date_created.
+        
+        Args:
+            records: List of pandas Series (rows) with the same entity key
+            date_created_col: Column name to check for date created
+            
+        Returns:
+            The record with the latest date_created
+        """
+        if len(records) == 1:
+            return records[0]
+        
+        latest_record = records[0]
+        latest_date = None
+        
+        # Parse date_created for the first record
+        if date_created_col in latest_record:
+            latest_date = self._parse_date_created(latest_record[date_created_col])
+        
+        # Compare with other records
+        for record in records[1:]:
+            if date_created_col in record:
+                current_date = self._parse_date_created(record[date_created_col])
+                
+                # If current record has a later date_created, use it
+                if current_date and (latest_date is None or current_date > latest_date):
+                    latest_record = record
+                    latest_date = current_date
+        
+        return latest_record
+    
+    def compare_summary_files_with_latest_date_created(self, summary_old_path: str, summary_new_path: str) -> Dict[str, any]:
+        """
+        NEW LOGIC: Compare summary files using latest date_created rule to avoid duplicates.
+        
+        For both Old and New files:
+        - Group items by entity key (Unit name, Tenant ID, Tenant) 
+        - Within each group, take the record with the latest date_created
+        - Then compare these deduplicated records
+        
+        Args:
+            summary_old_path: Path to previous period Summary file
+            summary_new_path: Path to current period Summary file
+        
+        Returns:
+            Dict with:
+            - 'changed_cells': dict mapping row indices to sets of changed column names
+            - 'changed_rows': set of row indices
+            - 'new_rows': set of entirely new row indices
+        """
+        print(f"Comparing Summary files using latest date_created rule:")
+        print(f"   Previous: {summary_old_path}")
+        print(f"   Current:  {summary_new_path}")
+        
+        # Load both files
+        old_df = self.load_summary_file(summary_old_path)
+        new_df = self.load_summary_file(summary_new_path)
+        
+        print(f"   Previous rows: {len(old_df)}, Current rows: {len(new_df)}")
+        
+        # Find date_created column in both files
+        old_date_created_col = None
+        new_date_created_col = None
+        
+        for col in old_df.columns:
+            if 'date' in col.lower() and 'created' in col.lower():
+                old_date_created_col = col
+                break
+        
+        for col in new_df.columns:
+            if 'date' in col.lower() and 'created' in col.lower():
+                new_date_created_col = col
+                break
+        
+        if not old_date_created_col or not new_date_created_col:
+            print(f"   Warning: Date created column not found. Falling back to regular comparison.")
+            return self.compare_summary_files(summary_old_path, summary_new_path)
+        
+        print(f"   Using date_created columns: Old='{old_date_created_col}', New='{new_date_created_col}'")
+        
+        # Group OLD file records by entity key and get latest date_created for each group
+        old_entity_groups = {}
+        for idx, row in old_df.iterrows():
+            entity_key = self.normalize_entity_key(row)
+            if entity_key and entity_key != '||':
+                if entity_key not in old_entity_groups:
+                    old_entity_groups[entity_key] = []
+                old_entity_groups[entity_key].append(row)
+        
+        # Get latest record for each entity in old file
+        old_latest_lookup = {}
+        for entity_key, records in old_entity_groups.items():
+            latest_record = self.get_latest_record_by_date_created(records, old_date_created_col)
+            old_latest_lookup[entity_key] = latest_record
+        
+        print(f"   Old file: {len(old_entity_groups)} entity groups -> {len(old_latest_lookup)} latest records")
+        
+        # Group NEW file records by entity key and get latest date_created for each group
+        new_entity_groups = {}
+        new_row_indices = {}  # Track original row indices
+        
+        for idx, row in new_df.iterrows():
+            entity_key = self.normalize_entity_key(row)
+            if entity_key and entity_key != '||':
+                if entity_key not in new_entity_groups:
+                    new_entity_groups[entity_key] = []
+                    new_row_indices[entity_key] = []
+                new_entity_groups[entity_key].append(row)
+                new_row_indices[entity_key].append(idx + 2)  # Excel row number
+        
+        # Get latest record for each entity in new file and track row numbers
+        new_latest_lookup = {}
+        latest_row_mapping = {}  # entity_key -> excel_row_num
+        
+        for entity_key, records in new_entity_groups.items():
+            latest_record = self.get_latest_record_by_date_created(records, new_date_created_col)
+            new_latest_lookup[entity_key] = latest_record
+            
+            # Find the row index of the latest record
+            for i, record in enumerate(records):
+                if latest_record.equals(record):
+                    latest_row_mapping[entity_key] = new_row_indices[entity_key][i]
+                    break
+        
+        print(f"   New file: {len(new_entity_groups)} entity groups -> {len(new_latest_lookup)} latest records")
+        
+        # Compare latest records
+        changed_rows = set()
+        changed_cells = {}
+        new_rows = set()
+        
+        for entity_key, new_latest in new_latest_lookup.items():
+            excel_row = latest_row_mapping[entity_key]
+            
+            if entity_key in old_latest_lookup:
+                # Compare latest records
+                old_latest = old_latest_lookup[entity_key]
+                changed_columns = set()
+                
+                for new_col, old_col in self.tracked_columns.items():
+                    if new_col in new_df.columns and old_col in old_df.columns:
+                        new_val = self._normalize_value(new_latest.get(new_col), new_col)
+                        old_val = self._normalize_value(old_latest.get(old_col), old_col)
+                        
+                        if new_val != old_val:
+                            changed_columns.add(new_col)
+                
+                if changed_columns:
+                    changed_rows.add(excel_row)
+                    changed_cells[excel_row] = changed_columns
+                    print(f"   Entity '{entity_key}' has changes in row {excel_row}")
+            else:
+                # Entirely new entity
+                new_rows.add(excel_row)
+                changed_rows.add(excel_row)
+                
+                # Mark all tracked columns as new for highlighting
+                all_columns = set(self.tracked_columns.keys())
+                all_columns = {col for col in all_columns if col in new_df.columns}
+                changed_cells[excel_row] = all_columns
+                
+                print(f"   New entity '{entity_key}' in row {excel_row}")
+        
+        print(f"   Found {len(new_rows)} entirely new entities")
+        print(f"   Found {len(changed_rows)} total rows with changes")
+        print(f"   Deduplication applied: Latest date_created used for each entity")
+        
+        return {
+            'changed_rows': changed_rows,
+            'changed_cells': changed_cells,
+            'new_rows': new_rows
+        }
+    
     def get_document_number(self, row: pd.Series) -> str:
         """Extract Document Number from row"""
         if self.document_number_column in row:
@@ -904,6 +1080,190 @@ class SummaryComparator:
         except Exception as e:
             print(f"   Error applying enhanced highlighting to Summary file: {e}\"")
             return False
+    
+    def process_summary_comparison_with_latest_date_created(self, summary_old_path: str, summary_new_path: str, 
+                                                          generate_log: bool = True, log_file_path: str = None) -> bool:
+        """
+        Complete workflow using NEW latest date_created deduplication logic.
+        
+        This method implements the updated requirements:
+        1. Group items by entity key (Unit name, Tenant ID, Tenant)
+        2. For each group, use the record with the latest date_created
+        3. Compare these deduplicated records to avoid duplicate processing
+        4. Highlight changes with appropriate colors
+        
+        Args:
+            summary_old_path: Path to previous period Summary file
+            summary_new_path: Path to current period Summary file
+            generate_log: Whether to generate detailed change log file
+            log_file_path: Optional custom path for log file
+        
+        Returns:
+            True if process completed successfully
+        """
+        try:
+            # Validate files exist
+            if not os.path.exists(summary_old_path):
+                print(f"   Previous file not found: {summary_old_path}")
+                return False
+            
+            if not os.path.exists(summary_new_path):
+                print(f"   Current file not found: {summary_new_path}")
+                return False
+            
+            print(f"Starting latest date_created deduplication comparison workflow")
+            
+            # Use the new latest date_created comparison logic
+            comparison_results = self.compare_summary_files_with_latest_date_created(summary_old_path, summary_new_path)
+            
+            changed_rows = comparison_results['changed_rows']
+            changed_cells = comparison_results['changed_cells']
+            new_rows = comparison_results['new_rows']
+            
+            # Generate detailed log if requested
+            if generate_log:
+                log_path = self.generate_latest_date_created_change_log(
+                    summary_old_path, summary_new_path, comparison_results, log_file_path
+                )
+                print(f"   Detailed log saved: {log_path}")
+            
+            # Apply enhanced highlighting (blue cells for changes, yellow rows for new entities)
+            success = self.apply_enhanced_highlighting_to_summary(summary_new_path, comparison_results)
+            
+            if success:
+                print(f"   Latest date_created comparison completed successfully!")
+                print(f"   Entirely new entities: {len(new_rows)}")
+                print(f"   Total rows with changes: {len(changed_rows)}")
+                print(f"   Individual cell changes: {sum(len(cols) for cols in changed_cells.values())}")
+                if generate_log:
+                    print(f"   Detailed change log: {log_path}")
+            
+            return success
+            
+        except Exception as e:
+            print(f"   Error in latest date_created comparison process: {e}")
+            return False
+    
+    def generate_latest_date_created_change_log(self, summary_old_path: str, summary_new_path: str, 
+                                              comparison_results: Dict, log_file_path: str = None) -> str:
+        """
+        Generate a detailed log file for latest date_created comparison
+        
+        Args:
+            summary_old_path: Path to previous period Summary file
+            summary_new_path: Path to current period Summary file
+            comparison_results: Results from compare_summary_files_with_latest_date_created
+            log_file_path: Optional custom path for log file
+        
+        Returns:
+            Path to the generated log file
+        """
+        from datetime import datetime
+        
+        # Auto-generate log file path if not provided
+        if log_file_path is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            old_name = os.path.splitext(os.path.basename(summary_old_path))[0]
+            new_name = os.path.splitext(os.path.basename(summary_new_path))[0]
+            log_file_path = f"latest_date_created_comparison_{old_name}_vs_{new_name}_{timestamp}.log"
+        
+        print(f"Generating latest date_created-based change log: {log_file_path}")
+        
+        try:
+            # Load files for detailed analysis
+            old_df = self.load_summary_file(summary_old_path)
+            new_df = self.load_summary_file(summary_new_path)
+            
+            changed_rows = comparison_results['changed_rows']
+            changed_cells = comparison_results['changed_cells']
+            new_rows = comparison_results['new_rows']
+            
+            # Generate log content
+            content = []
+            content.append("=" * 100)
+            content.append("LATEST DATE_CREATED DEDUPLICATION SUMMARY COMPARISON LOG")
+            content.append("=" * 100)
+            content.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            content.append(f"Previous File: {summary_old_path}")
+            content.append(f"Current File:  {summary_new_path}")
+            content.append(f"Deduplication Rule: Latest date_created for each entity key")
+            content.append(f"Entity Keys: {', '.join(self.entity_key_columns)}")
+            content.append("")
+            
+            # Summary statistics
+            content.append("📊 SUMMARY STATISTICS")
+            content.append("-" * 50)
+            content.append(f"Total rows in previous file: {len(old_df)}")
+            content.append(f"Total rows in current file:  {len(new_df)}")
+            content.append(f"Entirely new entities: {len(new_rows)}")
+            content.append(f"Entities with changes: {len(changed_rows) - len(new_rows)}")
+            content.append(f"Total rows with changes: {len(changed_rows)}")
+            content.append(f"Total individual cell changes: {sum(len(cols) for cols in changed_cells.values())}")
+            content.append("")
+            
+            # New entities
+            if new_rows:
+                content.append("🆕 ENTIRELY NEW ENTITIES")
+                content.append("-" * 50)
+                
+                for i, row_num in enumerate(sorted(new_rows), 1):
+                    try:
+                        # Get row data (convert from Excel row number to DataFrame index)
+                        df_idx = row_num - 2
+                        if df_idx < len(new_df):
+                            row_data = new_df.iloc[df_idx]
+                            
+                            content.append(f"[{i}] ROW {row_num} - NEW ENTITY")
+                            content.append(f"    Entity: Unit='{row_data.get('Unit name', '')}', "
+                                         f"TenantID='{row_data.get('Tenant ID', '')}', "
+                                         f"Tenant='{row_data.get('Tenant', '')}'")
+                            content.append(f"    Date Created: '{row_data.get('Date created', '')}'")
+                            content.append(f"    Highlighting: Yellow row")
+                            content.append("")
+                    except Exception as e:
+                        content.append(f"[{i}] ROW {row_num} - Error reading data: {e}")
+                        content.append("")
+            
+            # Changed entities (existing but modified)
+            changed_entities = {row: cols for row, cols in changed_cells.items() if row not in new_rows}
+            if changed_entities:
+                content.append("📝 ENTITIES WITH CHANGES")
+                content.append("-" * 50)
+                
+                for i, (row_num, changed_columns) in enumerate(sorted(changed_entities.items()), 1):
+                    try:
+                        # Get row data
+                        df_idx = row_num - 2
+                        if df_idx < len(new_df):
+                            row_data = new_df.iloc[df_idx]
+                            
+                            content.append(f"[{i}] ROW {row_num} - MODIFIED ENTITY")
+                            content.append(f"    Entity: Unit='{row_data.get('Unit name', '')}', "
+                                         f"TenantID='{row_data.get('Tenant ID', '')}', "
+                                         f"Tenant='{row_data.get('Tenant', '')}'")
+                            content.append(f"    Date Created: '{row_data.get('Date created', '')}'")
+                            content.append(f"    Modified Columns: {', '.join(changed_columns)}")
+                            content.append(f"    Highlighting: Blue cells")
+                            content.append("")
+                    except Exception as e:
+                        content.append(f"[{i}] ROW {row_num} - Error reading data: {e}")
+                        content.append("")
+            
+            content.append("=" * 100)
+            content.append("END OF LATEST DATE_CREATED COMPARISON LOG")
+            content.append("=" * 100)
+            
+            # Write log file
+            with open(log_file_path, 'w', encoding='utf-8') as f:
+                f.write("\n".join(content))
+            
+            print(f"   Latest date_created change log generated: {log_file_path}")
+            
+            return log_file_path
+            
+        except Exception as e:
+            print(f"   Error generating latest date_created change log: {e}")
+            raise
 
     
     def apply_document_number_highlighting_to_summary(self, summary_path: str, comparison_result: Dict[str, any]) -> bool:
@@ -1002,7 +1362,7 @@ class SummaryComparator:
             comparison_results = self.compare_summary_files_by_document_number(summary_old_path, summary_new_path)
             
             new_document_numbers = comparison_results['new_document_numbers']
-            changed_rows = comparison_results['changed_rows']
+            changed_rows = comparison_results['changed_rows-']
             changed_cells = comparison_results['changed_cells']
             entity_mapping = comparison_results['entity_mapping']
             
@@ -1893,8 +2253,7 @@ class SummaryComparator:
                 new_rows_df.to_excel(writer, sheet_name='new_rows', index=False)
                 
                 # Write update_rows sheet (standard formatting)
-                update_rows_df.to_excel(writer, sheet_name='update_rows', index=False)
-                
+                update_rows_df.to_excel(writer, sheet_name='update_rows', index=False)                
                 # Add a summary sheet with detailed info
                 summary_data = {
                     'Metric': [

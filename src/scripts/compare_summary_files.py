@@ -93,8 +93,7 @@ def generate_change_log_only(summary_old_path: str, summary_new_path: str, log_f
         print("  • Summary statistics")
         print("  • Column change frequency")
         print("  • Row-level details for each change")
-        print("  • Before/after values for modified columns")
-            
+        print("  • Before/after values for modified columns")            
     except Exception as e:
         print(f"\n❌ Error: {e}")
 
